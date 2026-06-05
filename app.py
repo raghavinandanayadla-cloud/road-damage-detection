@@ -181,7 +181,7 @@ def detections_to_df(result) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ─── Helper: simulate training metrics ──────────────────────
-def simulate_training_metrics(epochs: int = 40) -> pd.DataFrame:
+def simulate_training_metrics(epochs: int = 100) -> pd.DataFrame:
     """Generate realistic simulated training curves."""
     rng = np.random.default_rng(42)
     ep  = np.arange(1, epochs + 1)
@@ -267,7 +267,7 @@ with st.sidebar:
     st.markdown("**Model:** `YOLOv8s`")
     st.markdown("**Classes:** 4")
     st.markdown("**Input:** 640 × 640")
-    st.markdown("**Epochs:** 40")
+    st.markdown("**Epochs:** 100")
 
 # ═══════════════════════════════════════════════════════════
 # PAGE: OVERVIEW
@@ -352,8 +352,26 @@ if page == "🏠 Overview":
 # PAGE: DETECT
 # ═══════════════════════════════════════════════════════════
 elif page == "🔍 Detect":
+
+    # ── Determine whether real model is available ────────────
+    MODEL_AVAILABLE = os.path.exists(MODEL_PATH)
+
     st.title("🔍 Detect Road Damage")
-    st.markdown("Upload a road image to detect and classify damage with bounding boxes.")
+
+    if not MODEL_AVAILABLE:
+        st.markdown("""
+        <div style="background:#1c2a1e;border:1px solid #3fb950;border-radius:10px;
+                    padding:14px 18px;margin-bottom:18px;">
+            <span style="font-size:1.1rem;font-weight:700;color:#3fb950">🟢 Demo Mode</span><br>
+            <span style="color:#8b949e;font-size:0.9rem">
+                Running without model weights — upload any road image to see a
+                realistic simulation of YOLOv8 detections. To enable live inference,
+                place <code>best.pt</code> in the <code>weights/</code> folder and restart the app.
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("Upload a road image to detect and classify damage with bounding boxes.")
 
     uploaded = st.file_uploader(
         "Upload road image", type=["jpg", "jpeg", "png"],
@@ -377,28 +395,51 @@ elif page == "🔍 Detect":
 
         st.divider()
 
-        if not os.path.exists(MODEL_PATH):
-            st.warning(
-                f"⚠️ Model weights not found at `{MODEL_PATH}`. "
-                "Showing simulated detections for demo purposes.",
-                icon="⚠️"
-            )
-            # Simulate detections for demo
-            w, h = image.width, image.height
-            rng = random.Random(42)
-            num_det = rng.randint(1, 5)
-            fake_boxes = []
-            for _ in range(num_det):
-                cls  = rng.randint(0, 3)
-                x1   = rng.randint(50, w // 2)
-                y1   = rng.randint(50, h // 2)
-                x2   = x1 + rng.randint(60, min(200, w - x1 - 10))
-                y2   = y1 + rng.randint(40, min(150, h - y1 - 10))
-                conf = round(rng.uniform(conf_threshold + 0.01, 0.95), 3)
-                name = CLASS_NAMES[cls]
-                fake_boxes.append((cls, name, conf, x1, y1, x2, y2))
+        if not MODEL_AVAILABLE:
+            # ── Demo mode: generate realistic, image-proportional boxes ──
+            # Seed from image content so the same image always gives same boxes
+            img_bytes = uploaded.getvalue()
+            seed = int.from_bytes(img_bytes[:8], "big") % (2**31)
+            rng  = random.Random(seed)
 
-            # Draw on matplotlib figure
+            w, h = image.width, image.height
+            margin_x = max(20, int(w * 0.05))
+            margin_y = max(20, int(h * 0.05))
+            box_w_max = max(80, int(w * 0.30))
+            box_h_max = max(60, int(h * 0.25))
+            box_w_min = max(40, int(w * 0.08))
+            box_h_min = max(30, int(h * 0.06))
+
+            # Number of detections scales with confidence threshold
+            num_det = rng.randint(2, 5) if conf_threshold < 0.5 else rng.randint(1, 3)
+
+            # Avoid heavily overlapping boxes
+            fake_boxes = []
+            attempts   = 0
+            while len(fake_boxes) < num_det and attempts < 40:
+                attempts += 1
+                cls   = rng.randint(0, 3)
+                bw    = rng.randint(box_w_min, box_w_max)
+                bh    = rng.randint(box_h_min, box_h_max)
+                x1    = rng.randint(margin_x, w - bw - margin_x)
+                y1    = rng.randint(margin_y, h - bh - margin_y)
+                x2    = x1 + bw
+                y2    = y1 + bh
+                conf  = round(rng.uniform(max(conf_threshold + 0.02, 0.30), 0.96), 3)
+                name  = CLASS_NAMES[cls]
+
+                # Simple overlap check
+                overlap = False
+                for _, _, _, ex1, ey1, ex2, ey2 in fake_boxes:
+                    ix = max(0, min(x2, ex2) - max(x1, ex1))
+                    iy = max(0, min(y2, ey2) - max(y1, ey1))
+                    if ix * iy > 0.45 * bw * bh:
+                        overlap = True
+                        break
+                if not overlap:
+                    fake_boxes.append((cls, name, conf, x1, y1, x2, y2))
+
+            # Draw detections
             fig_det, ax_det = plt.subplots(figsize=(12, 8))
             fig_det.patch.set_facecolor("#0e1117")
             ax_det.set_facecolor("#0e1117")
@@ -408,18 +449,31 @@ elif page == "🔍 Detect":
                 rect  = mpatches.FancyBboxPatch(
                     (x1, y1), x2 - x1, y2 - y1,
                     boxstyle="round,pad=2", linewidth=2.5,
-                    edgecolor=color, facecolor="none"
+                    edgecolor=color, facecolor=color, alpha=0.08
                 )
                 ax_det.add_patch(rect)
+                # Solid border on top
+                border = mpatches.FancyBboxPatch(
+                    (x1, y1), x2 - x1, y2 - y1,
+                    boxstyle="round,pad=2", linewidth=2.5,
+                    edgecolor=color, facecolor="none"
+                )
+                ax_det.add_patch(border)
                 label = f"{CLASS_EMOJIS.get(name,'')} {name.replace('_',' ')} {conf:.2f}"
-                ax_det.text(x1, y1 - 6, label, fontsize=8.5, color="white",
-                            fontweight="bold",
-                            bbox=dict(facecolor=color, alpha=0.85, boxstyle="round,pad=2", edgecolor="none"))
+                label_y = y1 - 8 if y1 > 20 else y2 + 4
+                ax_det.text(x1, label_y, label, fontsize=8.5, color="white",
+                            fontweight="bold", va="bottom" if y1 > 20 else "top",
+                            bbox=dict(facecolor=color, alpha=0.88,
+                                      boxstyle="round,pad=2", edgecolor="none"))
             ax_det.axis("off")
-            ax_det.set_title("YOLOv8 Road Damage Detections (Demo Mode)", color="#c9d1d9", fontsize=13, pad=10)
+            ax_det.set_title(
+                "YOLOv8 Road Damage Detections  •  Demo Mode",
+                color="#c9d1d9", fontsize=13, pad=10
+            )
             plt.tight_layout(pad=0)
 
-            st.markdown('<div class="section-header"><h2>🖼️ Detection Result</h2></div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-header"><h2>🖼️ Detection Result</h2></div>',
+                        unsafe_allow_html=True)
             st.pyplot(fig_det, use_container_width=True)
             plt.close(fig_det)
 
@@ -512,7 +566,9 @@ elif page == "🔍 Detect":
             <b>Tips for best results:</b><br>
             • Use clear, well-lit road surface images<br>
             • Higher resolution images improve detection accuracy<br>
-            • Adjust confidence threshold in the sidebar (lower = more detections)
+            • Lower the confidence threshold in the sidebar to surface more detections<br>
+            • Try different images — the demo boxes are seeded from image content,
+              so each unique photo produces a different result
         </div>
         """, unsafe_allow_html=True)
 
@@ -717,7 +773,7 @@ elif page == "ℹ️ About":
     ### 🔧 Training Setup
     | Hyperparameter | Value |
     |---|---|
-    | Epochs | 40 |
+    | Epochs | 100 |
     | Batch size | 8 |
     | Optimizer | SGD |
     | Learning rate | 0.001 |
