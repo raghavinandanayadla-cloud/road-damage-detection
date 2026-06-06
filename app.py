@@ -328,24 +328,16 @@ REAL_METRICS = {
 
 # Search multiple locations so the app works on Streamlit Cloud,
 # local dev, and any repo layout automatically.
-def _find_model():
-    candidates = [
-        "weights/best.pt",                  # local standard layout
-        "best.pt",                          # repo root
-        "model/best.pt",                    # alternative folder
-        "runs/detect/train/weights/best.pt",# ultralytics default output
-        "runs/detect/run2/weights/best.pt",
-        "/mount/src/road-damage-detection/weights/best.pt",  # Streamlit Cloud
-        "/mount/src/road-damage-detection/best.pt",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return None
+# ---------------- MODEL ----------------
 
-MODEL_PATH = _find_model()
+MODEL_PATH = "weights/best.pt"
 
+@st.cache_resource(show_spinner=False)
+def load_model():
+    from ultralytics import YOLO
+    return YOLO(MODEL_PATH)
 
+model = load_model()
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_model(path):
@@ -356,7 +348,7 @@ def load_model(path):
         return None, str(e)
 
 
-def demo_detections(image, conf_threshold, seed_bytes):
+'''def demo_detections(image, conf_threshold, seed_bytes):
     """Generate proportional, non-overlapping demo bounding boxes."""
     seed = int.from_bytes(seed_bytes[:8], "big") % (2**31)
     rng  = random.Random(seed)
@@ -382,7 +374,7 @@ def demo_detections(image, conf_threshold, seed_bytes):
         )
         if not overlap:
             boxes.append((cls, name, conf, x1, y1, x2, y2))
-    return boxes
+    return boxes'''
 
 
 def draw_boxes(image, boxes_list, title="YOLOv8 Detection Output"):
@@ -763,12 +755,13 @@ if st.session_state.uploaded_image is not None:
     active_image = Image.open(io.BytesIO(st.session_state.uploaded_image)).convert("RGB")
     active_name  = st.session_state.image_name
 
-    if MODEL_PATH is not None and os.path.exists(MODEL_PATH):
-        model, err = load_model(MODEL_PATH)
-        if not err:
-            with st.spinner("Running YOLOv8 inference…"):
-                result = model.predict(source=np.array(active_image), conf=conf_threshold,
-                                       iou=iou_threshold, verbose=False)[0]
+  with st.spinner("Running YOLOv8 inference..."):
+    result = model.predict(
+        source=np.array(active_image),
+        conf=conf_threshold,
+        iou=iou_threshold,
+        verbose=False
+    )[0]
             boxes_raw = result.boxes
             if boxes_raw is not None:
                 for box in boxes_raw:
@@ -776,9 +769,6 @@ if st.session_state.uploaded_image is not None:
                     name = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"class_{cls}"
                     x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
                     active_boxes.append((cls, name, float(box.conf[0]), x1, y1, x2, y2))
-    else:
-        active_boxes = demo_detections(active_image, conf_threshold,
-                                       st.session_state.uploaded_image[:16])
         st.markdown("""
         <div class="demo-banner">
             🟡 <strong>Demo Mode</strong> — <code>best.pt</code> not detected in any expected path.
