@@ -752,16 +752,19 @@ sample_key      = None
 
 # Real upload path
 if st.session_state.uploaded_image is not None:
-    active_image = Image.open(io.BytesIO(st.session_state.uploaded_image)).convert("RGB")
-    active_name  = st.session_state.image_name
+    active_image = Image.open(
+        io.BytesIO(st.session_state.uploaded_image)
+    ).convert("RGB")
 
-  with st.spinner("Running YOLOv8 inference..."):
-    result = model.predict(
-        source=np.array(active_image),
-        conf=conf_threshold,
-        iou=iou_threshold,
-        verbose=False
-    )[0]
+    active_name = st.session_state.image_name
+
+    with st.spinner("Running YOLOv8 inference..."):
+        result = model.predict(
+            source=np.array(active_image),
+            conf=conf_threshold,
+            iou=iou_threshold,
+            verbose=False
+        )[0]
             boxes_raw = result.boxes
             if boxes_raw is not None:
                 for box in boxes_raw:
