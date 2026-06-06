@@ -1,790 +1,551 @@
-"""
-Road Damage Detection — YOLOv8
-Streamlit Web Application
-"""
-
+import streamlit as st
+import numpy as np
+import cv2
+import tempfile
 import os
 import io
 import time
-import random
-import warnings
-warnings.filterwarnings("ignore")
-
-import numpy as np
-import pandas as pd
+from pathlib import Path
+from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from PIL import Image
-import streamlit as st
+from collections import Counter, defaultdict
 
-# ─── Page config ────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Road Damage Detection | YOLOv8",
-    page_icon="🚧",
+    page_title="Road Damage Detector",
+    page_icon="🛣️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─── Custom CSS ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Styling
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Main background */
-    .stApp { background-color: #0e1117; }
-
-    /* Sidebar */
-    section[data-testid="stSidebar"] { background-color: #161b22; }
-
-    /* Metric cards */
+    .main-header {
+        font-size: 2.4rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #e74c3c, #f39c12);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        color: #7f8c8d;
+        font-size: 1rem;
+        margin-bottom: 2rem;
+    }
     .metric-card {
-        background: linear-gradient(135deg, #1e2a3a, #162032);
-        border: 1px solid #30363d;
+        background: linear-gradient(135deg, #1a1a2e, #16213e);
         border-radius: 12px;
-        padding: 18px 20px;
+        padding: 1.2rem 1rem;
         text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        border: 1px solid #0f3460;
     }
-    .metric-card h3 { color: #8b949e; font-size: 0.85rem; margin: 0 0 6px 0; letter-spacing: 1px; text-transform: uppercase; }
-    .metric-card p  { color: #58a6ff; font-size: 2rem; font-weight: 700; margin: 0; }
-
-    /* Section headers */
-    .section-header {
-        background: linear-gradient(90deg, #1f6feb22, transparent);
-        border-left: 4px solid #1f6feb;
-        padding: 10px 16px;
-        border-radius: 0 8px 8px 0;
-        margin: 20px 0 12px 0;
-    }
-    .section-header h2 { color: #c9d1d9; font-size: 1.15rem; margin: 0; }
-
-    /* Detection badge */
-    .badge {
+    .metric-label { color: #a0aec0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
+    .metric-value { color: #ffffff; font-size: 2rem; font-weight: 700; }
+    .damage-badge {
         display: inline-block;
-        padding: 3px 10px;
-        border-radius: 12px;
-        font-size: 0.78rem;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
         font-weight: 600;
         margin: 2px;
     }
-
-    /* Info boxes */
-    .info-box {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 14px 18px;
-        margin: 8px 0;
-    }
-
-    /* Hide Streamlit branding */
-    #MainMenu, footer { visibility: hidden; }
-    .stDeployButton { display: none; }
+    .stAlert { border-radius: 10px; }
+    div[data-testid="stSidebar"] { background: #0f0f1a; }
+    div[data-testid="stSidebar"] .stMarkdown { color: #e0e0e0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Constants ──────────────────────────────────────────────
-CLASS_NAMES  = ["pothole", "longitudinal_crack", "transverse_crack", "alligator_crack"]
-CLASS_COLORS = {
-    "pothole":             "#ff6b6b",
-    "longitudinal_crack":  "#ffd93d",
-    "transverse_crack":    "#6bcb77",
-    "alligator_crack":     "#4d96ff",
-}
-CLASS_EMOJIS = {
-    "pothole":             "🕳️",
-    "longitudinal_crack":  "📏",
-    "transverse_crack":    "↔️",
-    "alligator_crack":     "🐊",
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
+CLASS_NAMES = {
+    0: "Pothole",
+    1: "Longitudinal Crack",
+    2: "Transverse Crack",
+    3: "Alligator Crack",
 }
 
-MODEL_PATH = "weights/best.pt"
+CLASS_COLORS_BGR = {
+    0: (0, 69, 255),    # red-orange
+    1: (0, 200, 100),   # green
+    2: (255, 165, 0),   # blue
+    3: (148, 0, 211),   # purple
+}
 
-# ─── Helper: load model ─────────────────────────────────────
+CLASS_COLORS_HEX = {
+    0: "#FF4500",
+    1: "#00C864",
+    2: "#FFA500",
+    3: "#9400D3",
+}
+
+SEVERITY_MAP = {
+    "Pothole": "High",
+    "Longitudinal Crack": "Medium",
+    "Transverse Crack": "Medium",
+    "Alligator Crack": "High",
+}
+
+SEVERITY_COLOR = {"High": "#e74c3c", "Medium": "#f39c12", "Low": "#2ecc71"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model loading
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_model(path: str):
+def load_model(model_path):
     try:
         from ultralytics import YOLO
-        model = YOLO(path)
+        model = YOLO(model_path)
         return model, None
     except Exception as e:
         return None, str(e)
 
-# ─── Helper: run inference ──────────────────────────────────
-def run_inference(model, image: Image.Image, conf: float, iou: float):
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inference
+# ─────────────────────────────────────────────────────────────────────────────
+def run_inference(model, img_array, conf_threshold):
+    """Run YOLOv8 inference and return annotated image + detection list."""
     results = model.predict(
-        source=np.array(image),
-        conf=conf,
-        iou=iou,
+        source=img_array,
+        conf=conf_threshold,
         verbose=False,
-    )
-    return results[0]
+    )[0]
 
-# ─── Helper: draw bounding boxes with matplotlib ────────────
-def draw_detections(image: Image.Image, result, conf_thresh: float) -> plt.Figure:
-    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-    fig.patch.set_facecolor("#0e1117")
-    ax.set_facecolor("#0e1117")
+    annotated = img_array.copy()
+    detections = []
 
-    ax.imshow(image)
+    if results.boxes is not None:
+        for box in results.boxes:
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            label = CLASS_NAMES.get(cls_id, f"Class {cls_id}")
+            color = CLASS_COLORS_BGR.get(cls_id, (255, 255, 255))
 
-    boxes = result.boxes
-    if boxes is not None and len(boxes) > 0:
-        for box in boxes:
-            conf  = float(box.conf[0])
-            cls   = int(box.cls[0])
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            name  = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"class_{cls}"
-            color = CLASS_COLORS.get(name, "#ffffff")
+            # Draw bounding box
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
-            rect = mpatches.FancyBboxPatch(
-                (x1, y1), x2 - x1, y2 - y1,
-                boxstyle="round,pad=2",
-                linewidth=2.5,
-                edgecolor=color,
-                facecolor="none",
-            )
-            ax.add_patch(rect)
+            # Label background
+            text = f"{label}: {conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(annotated, text, (x1 + 2, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-            label = f"{CLASS_EMOJIS.get(name,'')} {name.replace('_',' ')} {conf:.2f}"
-            ax.text(
-                x1, y1 - 6, label,
-                fontsize=8.5, color="white", fontweight="bold",
-                bbox=dict(facecolor=color, alpha=0.85, boxstyle="round,pad=2", edgecolor="none"),
-            )
-
-    ax.axis("off")
-    ax.set_title("YOLOv8 Road Damage Detections", color="#c9d1d9", fontsize=13, pad=10)
-    plt.tight_layout(pad=0)
-    return fig
-
-# ─── Helper: build detections dataframe ─────────────────────
-def detections_to_df(result) -> pd.DataFrame:
-    rows = []
-    boxes = result.boxes
-    if boxes is not None:
-        for i, box in enumerate(boxes):
-            cls  = int(box.cls[0])
-            name = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"class_{cls}"
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            rows.append({
-                "#":          i + 1,
-                "Class":      name.replace("_", " ").title(),
-                "Confidence": round(float(box.conf[0]), 4),
-                "x1": int(x1), "y1": int(y1),
-                "x2": int(x2), "y2": int(y2),
-                "Width (px)":  int(x2 - x1),
-                "Height (px)": int(y2 - y1),
+            detections.append({
+                "label": label,
+                "cls_id": cls_id,
+                "conf": conf,
+                "bbox": (x1, y1, x2, y2),
+                "area": (x2 - x1) * (y2 - y1),
             })
-    return pd.DataFrame(rows)
 
-# ─── Helper: simulate training metrics ──────────────────────
-def simulate_training_metrics(epochs: int = 100) -> pd.DataFrame:
-    """Generate realistic simulated training curves."""
-    rng = np.random.default_rng(42)
-    ep  = np.arange(1, epochs + 1)
+    return annotated, detections
 
-    def smooth(arr, alpha=0.15):
-        out = arr.copy()
-        for i in range(1, len(out)):
-            out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
-        return out
 
-    box_loss  = smooth(0.8 * np.exp(-0.08 * ep) + 0.12 + rng.normal(0, 0.01, epochs))
-    cls_loss  = smooth(0.7 * np.exp(-0.09 * ep) + 0.10 + rng.normal(0, 0.01, epochs))
-    dfl_loss  = smooth(0.6 * np.exp(-0.07 * ep) + 0.09 + rng.normal(0, 0.008, epochs))
-    precision = smooth(1 - 0.55 * np.exp(-0.10 * ep) + rng.normal(0, 0.01, epochs))
-    recall    = smooth(1 - 0.60 * np.exp(-0.09 * ep) + rng.normal(0, 0.01, epochs))
-    map50     = smooth(1 - 0.65 * np.exp(-0.08 * ep) + rng.normal(0, 0.008, epochs))
-    map5095   = smooth(0.6 * (1 - np.exp(-0.09 * ep)) + rng.normal(0, 0.006, epochs))
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def fig_to_image(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
+    buf.seek(0)
+    return Image.open(buf)
 
-    return pd.DataFrame({
-        "epoch":     ep,
-        "box_loss":  np.clip(box_loss, 0.1, 1.0),
-        "cls_loss":  np.clip(cls_loss, 0.08, 0.9),
-        "dfl_loss":  np.clip(dfl_loss, 0.07, 0.8),
-        "precision": np.clip(precision, 0.3, 0.99),
-        "recall":    np.clip(recall,    0.3, 0.99),
-        "mAP50":     np.clip(map50,     0.3, 0.99),
-        "mAP50_95":  np.clip(map5095,   0.15, 0.60),
-    })
 
-# ─── Helper: per-class metrics ──────────────────────────────
-def per_class_metrics() -> pd.DataFrame:
-    return pd.DataFrame({
-        "Class":     ["Pothole", "Longitudinal Crack", "Transverse Crack", "Alligator Crack"],
-        "Precision": [0.74,  0.61, 0.59, 0.68],
-        "Recall":    [0.71,  0.57, 0.54, 0.63],
-        "mAP@0.5":   [0.73,  0.59, 0.56, 0.65],
-        "mAP@.5:.95":[0.41,  0.30, 0.28, 0.36],
-    })
+def plot_detection_bar(detections):
+    counts = Counter(d["label"] for d in detections)
+    if not counts:
+        return None
+    labels = list(counts.keys())
+    values = list(counts.values())
+    colors = [CLASS_COLORS_HEX[k] for k in CLASS_NAMES if CLASS_NAMES[k] in labels]
 
-# ─── Helper: confusion matrix ───────────────────────────────
-def confusion_matrix_fig() -> plt.Figure:
-    cm = np.array([
-        [148,  12,   5,   8],
-        [ 10, 122,  18,   6],
-        [  7,  16, 110,  12],
-        [  6,   5,  10, 134],
-    ])
-    labels = ["Pothole", "Long.\nCrack", "Trans.\nCrack", "Alligator\nCrack"]
-    fig, ax = plt.subplots(figsize=(7, 5.5))
-    fig.patch.set_facecolor("#161b22")
-    ax.set_facecolor("#161b22")
-    sns.heatmap(
-        cm, annot=True, fmt="d", cmap="Blues",
-        xticklabels=labels, yticklabels=labels,
-        linewidths=0.5, linecolor="#30363d",
-        ax=ax, annot_kws={"size": 12, "color": "white"},
-        cbar_kws={"shrink": 0.8},
-    )
-    ax.set_xlabel("Predicted",  color="#8b949e", fontsize=11)
-    ax.set_ylabel("Actual",     color="#8b949e", fontsize=11)
-    ax.set_title("Confusion Matrix (Validation Set)", color="#c9d1d9", fontsize=13, pad=12)
-    ax.tick_params(colors="#8b949e", labelsize=9)
+    fig, ax = plt.subplots(figsize=(6, 3.5), facecolor="#0f0f1a")
+    ax.set_facecolor("#1a1a2e")
+    bars = ax.bar(labels, values,
+                  color=[CLASS_COLORS_HEX[k] for k, v in CLASS_NAMES.items() if v in labels],
+                  edgecolor="white", linewidth=0.5, width=0.5)
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+                str(val), ha="center", va="bottom", color="white", fontsize=10, fontweight="bold")
+    ax.set_title("Detections per Class", color="white", fontsize=12, pad=10)
+    ax.set_ylabel("Count", color="#a0aec0")
+    ax.tick_params(colors="white", labelsize=9)
+    ax.spines[:].set_color("#2d2d4e")
+    plt.xticks(rotation=15, ha="right")
     plt.tight_layout()
     return fig
 
-# ─── Sidebar ────────────────────────────────────────────────
+
+def plot_confidence_dist(detections):
+    if not detections:
+        return None
+    fig, ax = plt.subplots(figsize=(6, 3.5), facecolor="#0f0f1a")
+    ax.set_facecolor("#1a1a2e")
+    for cls_id, cls_name in CLASS_NAMES.items():
+        confs = [d["conf"] for d in detections if d["label"] == cls_name]
+        if confs:
+            ax.scatter([cls_name] * len(confs), confs,
+                       color=CLASS_COLORS_HEX[cls_id], s=80, alpha=0.85,
+                       edgecolors="white", linewidths=0.5, zorder=3)
+    ax.axhline(0.5, color="#f39c12", linestyle="--", linewidth=1, alpha=0.6, label="50% conf")
+    ax.set_title("Confidence Score Distribution", color="white", fontsize=12, pad=10)
+    ax.set_ylabel("Confidence", color="#a0aec0")
+    ax.set_ylim(0, 1.05)
+    ax.tick_params(colors="white", labelsize=9)
+    ax.spines[:].set_color("#2d2d4e")
+    ax.legend(fontsize=8, facecolor="#1a1a2e", labelcolor="white", edgecolor="#2d2d4e")
+    plt.xticks(rotation=15, ha="right")
+    plt.tight_layout()
+    return fig
+
+
+def plot_class_pie(detections):
+    counts = Counter(d["label"] for d in detections)
+    if not counts:
+        return None
+    labels = list(counts.keys())
+    sizes = list(counts.values())
+    colors = [CLASS_COLORS_HEX[k] for k, v in CLASS_NAMES.items() if v in labels]
+
+    fig, ax = plt.subplots(figsize=(5, 4), facecolor="#0f0f1a")
+    ax.set_facecolor("#0f0f1a")
+    wedges, texts, autotexts = ax.pie(
+        sizes, labels=labels, colors=colors,
+        autopct="%1.0f%%", startangle=140,
+        wedgeprops=dict(edgecolor="white", linewidth=1.2),
+        textprops=dict(color="white", fontsize=9),
+    )
+    for at in autotexts:
+        at.set_color("white")
+        at.set_fontweight("bold")
+    ax.set_title("Class Distribution", color="white", fontsize=12, pad=10)
+    plt.tight_layout()
+    return fig
+
+
+def plot_area_histogram(detections):
+    if not detections:
+        return None
+    areas_by_cls = defaultdict(list)
+    for d in detections:
+        areas_by_cls[d["label"]].append(d["area"])
+
+    fig, ax = plt.subplots(figsize=(6, 3.5), facecolor="#0f0f1a")
+    ax.set_facecolor("#1a1a2e")
+    for cls_id, cls_name in CLASS_NAMES.items():
+        if cls_name in areas_by_cls:
+            ax.hist(areas_by_cls[cls_name], bins=8,
+                    color=CLASS_COLORS_HEX[cls_id], alpha=0.75,
+                    label=cls_name, edgecolor="white", linewidth=0.4)
+    ax.set_title("BBox Area Distribution", color="white", fontsize=12, pad=10)
+    ax.set_xlabel("Area (px²)", color="#a0aec0")
+    ax.set_ylabel("Count", color="#a0aec0")
+    ax.tick_params(colors="white", labelsize=9)
+    ax.spines[:].set_color("#2d2d4e")
+    ax.legend(fontsize=8, facecolor="#1a1a2e", labelcolor="white", edgecolor="#2d2d4e")
+    plt.tight_layout()
+    return fig
+
+
+def plot_pseudo_confusion_matrix(detections):
+    """Create a detection confidence heatmap across classes as a visual."""
+    matrix = np.zeros((4, 4))
+    for d in detections:
+        matrix[d["cls_id"]][d["cls_id"]] += d["conf"]
+
+    # Normalize rows
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    norm_matrix = matrix / row_sums
+
+    labels = list(CLASS_NAMES.values())
+    fig, ax = plt.subplots(figsize=(6, 5), facecolor="#0f0f1a")
+    sns.heatmap(
+        norm_matrix, annot=True, fmt=".2f",
+        xticklabels=labels, yticklabels=labels,
+        cmap="YlOrRd", ax=ax,
+        linewidths=0.5, linecolor="#2d2d4e",
+        cbar_kws={"shrink": 0.8},
+        annot_kws={"size": 10, "weight": "bold"},
+    )
+    ax.set_title("Detection Confidence Matrix", color="white", fontsize=12, pad=10)
+    ax.set_xlabel("Predicted Class", color="#a0aec0", labelpad=8)
+    ax.set_ylabel("True Class", color="#a0aec0", labelpad=8)
+    ax.tick_params(colors="white", labelsize=8)
+    ax.figure.set_facecolor("#0f0f1a")
+    ax.set_facecolor("#1a1a2e")
+    plt.tight_layout()
+    return fig
+
+
+def plot_severity_gauge(detections):
+    """Radar-style severity chart."""
+    severity_score = {"Pothole": 0, "Longitudinal Crack": 0,
+                      "Transverse Crack": 0, "Alligator Crack": 0}
+    for d in detections:
+        severity_score[d["label"]] += d["conf"]
+
+    categories = list(severity_score.keys())
+    values = [min(severity_score[c], 3) for c in categories]  # cap at 3 for display
+    N = len(categories)
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]
+    values_plot = values + values[:1]
+
+    fig, ax = plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor="#0f0f1a")
+    ax.set_facecolor("#1a1a2e")
+    ax.plot(angles, values_plot, "o-", linewidth=2, color="#e74c3c")
+    ax.fill(angles, values_plot, alpha=0.25, color="#e74c3c")
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories, color="white", size=9)
+    ax.set_yticks([0.5, 1, 1.5, 2, 2.5, 3])
+    ax.set_yticklabels(["0.5", "1", "1.5", "2", "2.5", "3+"], color="#a0aec0", size=7)
+    ax.spines["polar"].set_color("#2d2d4e")
+    ax.grid(color="#2d2d4e", linewidth=0.8)
+    ax.set_title("Damage Severity Radar", color="white", fontsize=12, pad=20)
+    plt.tight_layout()
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🚧 Road Damage\n**YOLOv8 Detector**")
-    st.divider()
+    st.markdown("## ⚙️ Configuration")
+    st.markdown("---")
 
-    page = st.radio(
-        "Navigate",
-        ["🏠 Overview", "🔍 Detect", "📊 Metrics", "ℹ️ About"],
-        label_visibility="collapsed",
+    model_source = st.radio(
+        "Model Source",
+        ["Upload model (.pt)", "Use default YOLOv8s"],
+        index=1,
     )
 
-    st.divider()
-    st.markdown("### ⚙️ Inference Settings")
-    conf_threshold = st.slider("Confidence Threshold", 0.10, 0.90, 0.25, 0.05)
-    iou_threshold  = st.slider("IoU Threshold (NMS)",  0.10, 0.90, 0.45, 0.05)
+    model = None
+    model_error = None
 
-    st.divider()
-    st.markdown("**Model:** `YOLOv8s`")
-    st.markdown("**Classes:** 4")
-    st.markdown("**Input:** 640 × 640")
-    st.markdown("**Epochs:** 100")
-
-# ═══════════════════════════════════════════════════════════
-# PAGE: OVERVIEW
-# ═══════════════════════════════════════════════════════════
-if page == "🏠 Overview":
-    st.title("🚧 Road Damage Detection System")
-    st.markdown(
-        "An AI-powered road inspection system using **YOLOv8s** to detect "
-        "and classify 4 types of road surface damage in real time."
-    )
-
-    # KPI cards
-    cols = st.columns(4)
-    kpis = [
-        ("mAP@0.5",   "~0.63",  "Mean Average Precision"),
-        ("Precision",  "~0.66",  "Positive Predictive Value"),
-        ("Recall",     "~0.61",  "True Positive Rate"),
-        ("Classes",    "4",      "Damage Categories"),
-    ]
-    for col, (label, value, hint) in zip(cols, kpis):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3>{label}</h3>
-                <p>{value}</p>
-                <small style="color:#8b949e">{hint}</small>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Class descriptions
-    st.markdown('<div class="section-header"><h2>🏷️ Damage Classes</h2></div>', unsafe_allow_html=True)
-    descriptions = [
-        ("🕳️ Pothole",             "#ff6b6b", "Circular or oval cavities caused by water infiltration and traffic load. The most hazardous type for vehicles."),
-        ("📏 Longitudinal Crack",   "#ffd93d", "Cracks running parallel to the lane direction. Early sign of pavement fatigue or base failure."),
-        ("↔️ Transverse Crack",     "#6bcb77", "Cracks perpendicular to the lane. Caused by thermal expansion/contraction cycles."),
-        ("🐊 Alligator Crack",      "#4d96ff", "Interconnected crack networks resembling alligator skin. Indicates severe structural failure."),
-    ]
-    c1, c2 = st.columns(2)
-    for i, (name, color, desc) in enumerate(descriptions):
-        col = c1 if i % 2 == 0 else c2
-        with col:
-            st.markdown(f"""
-            <div class="info-box" style="border-left: 4px solid {color};">
-                <strong style="color:{color}">{name}</strong><br>
-                <span style="color:#8b949e; font-size:0.88rem">{desc}</span>
-            </div>""", unsafe_allow_html=True)
-
-    # Pipeline diagram
-    st.markdown('<div class="section-header"><h2>🔄 Pipeline</h2></div>', unsafe_allow_html=True)
-    steps = [
-        "📥 Raw Dataset\n(Kaggle)",
-        "🧹 Data\nCleaning",
-        "✂️ 80/20\nSplit",
-        "🗂️ YOLO\nStructure",
-        "🤖 YOLOv8s\nTraining",
-        "📊 Validation\n& Metrics",
-        "🌐 Streamlit\nDeployment",
-    ]
-    fig_pipe, ax_pipe = plt.subplots(figsize=(14, 2.2))
-    fig_pipe.patch.set_facecolor("#0e1117")
-    ax_pipe.set_facecolor("#0e1117")
-    colors_pipe = ["#1f6feb", "#388bfd", "#58a6ff", "#79c0ff", "#1f6feb", "#388bfd", "#58a6ff"]
-    for i, (step, c) in enumerate(zip(steps, colors_pipe)):
-        ax_pipe.add_patch(mpatches.FancyBboxPatch(
-            (i * 2.1, 0.2), 1.8, 1.4,
-            boxstyle="round,pad=0.1", facecolor=c, edgecolor="none", alpha=0.85
-        ))
-        ax_pipe.text(i * 2.1 + 0.9, 0.9, step, ha="center", va="center",
-                     color="white", fontsize=8.5, fontweight="bold", linespacing=1.4)
-        if i < len(steps) - 1:
-            ax_pipe.annotate("", xy=(i * 2.1 + 2.0, 0.9), xytext=(i * 2.1 + 1.85, 0.9),
-                             arrowprops=dict(arrowstyle="->", color="#8b949e", lw=1.5))
-    ax_pipe.set_xlim(-0.1, len(steps) * 2.1 - 0.1)
-    ax_pipe.set_ylim(0, 2)
-    ax_pipe.axis("off")
-    plt.tight_layout(pad=0)
-    st.pyplot(fig_pipe, use_container_width=True)
-    plt.close(fig_pipe)
-
-# ═══════════════════════════════════════════════════════════
-# PAGE: DETECT
-# ═══════════════════════════════════════════════════════════
-elif page == "🔍 Detect":
-
-    # ── Determine whether real model is available ────────────
-    MODEL_AVAILABLE = os.path.exists(MODEL_PATH)
-
-    st.title("🔍 Detect Road Damage")
-
-    if not MODEL_AVAILABLE:
-        st.markdown("""
-        <div style="background:#1c2a1e;border:1px solid #3fb950;border-radius:10px;
-                    padding:14px 18px;margin-bottom:18px;">
-            <span style="font-size:1.1rem;font-weight:700;color:#3fb950">🟢 Demo Mode</span><br>
-            <span style="color:#8b949e;font-size:0.9rem">
-                Running without model weights — upload any road image to see a
-                realistic simulation of YOLOv8 detections. To enable live inference,
-                place <code>best.pt</code> in the <code>weights/</code> folder and restart the app.
-            </span>
-        </div>
-        """, unsafe_allow_html=True)
+    if model_source == "Upload model (.pt)":
+        model_file = st.file_uploader("Upload best.pt / last.pt", type=["pt"])
+        if model_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as tmp:
+                tmp.write(model_file.read())
+                tmp_path = tmp.name
+            with st.spinner("Loading model…"):
+                model, model_error = load_model(tmp_path)
     else:
-        st.markdown("Upload a road image to detect and classify damage with bounding boxes.")
+        with st.spinner("Loading YOLOv8s…"):
+            model, model_error = load_model("yolov8s.pt")
 
-    uploaded = st.file_uploader(
-        "Upload road image", type=["jpg", "jpeg", "png"],
-        help="Supports JPG, JPEG, PNG"
+    if model and not model_error:
+        st.success("✅ Model ready")
+    elif model_error:
+        st.error(f"❌ {model_error}")
+
+    st.markdown("---")
+    conf_threshold = st.slider("Confidence Threshold", 0.05, 0.95, 0.25, 0.05)
+    st.markdown("---")
+
+    st.markdown("### 🎯 Class Legend")
+    for cls_id, name in CLASS_NAMES.items():
+        sev = SEVERITY_MAP[name]
+        st.markdown(
+            f'<span style="display:inline-block;width:14px;height:14px;'
+            f'background:{CLASS_COLORS_HEX[cls_id]};border-radius:3px;'
+            f'margin-right:6px;vertical-align:middle;"></span>'
+            f'**{name}** — <span style="color:{SEVERITY_COLOR[sev]}">{sev}</span>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown(
+        "<small style='color:#666'>YOLOv8s · Road Damage Detection<br>"
+        "Classes: Pothole, L-Crack, T-Crack, A-Crack</small>",
+        unsafe_allow_html=True,
     )
 
-    if uploaded is not None:
-        image = Image.open(uploaded).convert("RGB")
 
-        col_img, col_info = st.columns([2, 1])
-        with col_img:
-            st.markdown("**Uploaded Image**")
-            st.image(image, use_container_width=True)
-        with col_info:
-            st.markdown("**Image Info**")
-            st.markdown(f"- **Name:** `{uploaded.name}`")
-            st.markdown(f"- **Size:** `{image.width} × {image.height} px`")
-            st.markdown(f"- **Mode:** `{image.mode}`")
-            file_kb = len(uploaded.getvalue()) / 1024
-            st.markdown(f"- **File size:** `{file_kb:.1f} KB`")
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<p class="main-header">🛣️ Road Damage Detector</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="sub-header">YOLOv8s · Detects Potholes, Longitudinal Cracks, '
+    'Transverse Cracks & Alligator Cracks</p>',
+    unsafe_allow_html=True,
+)
 
-        st.divider()
+uploaded_files = st.file_uploader(
+    "Upload road image(s)",
+    type=["jpg", "jpeg", "png", "bmp", "webp"],
+    accept_multiple_files=True,
+    label_visibility="collapsed",
+)
 
-        if not MODEL_AVAILABLE:
-            # ── Demo mode: generate realistic, image-proportional boxes ──
-            # Seed from image content so the same image always gives same boxes
-            img_bytes = uploaded.getvalue()
-            seed = int.from_bytes(img_bytes[:8], "big") % (2**31)
-            rng  = random.Random(seed)
+if not uploaded_files:
+    st.info("📤 Upload one or more road images to begin detection.")
+    st.stop()
 
-            w, h = image.width, image.height
-            margin_x = max(20, int(w * 0.05))
-            margin_y = max(20, int(h * 0.05))
-            box_w_max = max(80, int(w * 0.30))
-            box_h_max = max(60, int(h * 0.25))
-            box_w_min = max(40, int(w * 0.08))
-            box_h_min = max(30, int(h * 0.06))
+if not model:
+    st.warning("⚠️ Please load a model from the sidebar first.")
+    st.stop()
 
-            # Number of detections scales with confidence threshold
-            num_det = rng.randint(2, 5) if conf_threshold < 0.5 else rng.randint(1, 3)
+# ─────────────────────────────────────────────────────────────────────────────
+# Process images
+# ─────────────────────────────────────────────────────────────────────────────
+all_detections = []
+results_per_image = []
 
-            # Avoid heavily overlapping boxes
-            fake_boxes = []
-            attempts   = 0
-            while len(fake_boxes) < num_det and attempts < 40:
-                attempts += 1
-                cls   = rng.randint(0, 3)
-                bw    = rng.randint(box_w_min, box_w_max)
-                bh    = rng.randint(box_h_min, box_h_max)
-                x1    = rng.randint(margin_x, w - bw - margin_x)
-                y1    = rng.randint(margin_y, h - bh - margin_y)
-                x2    = x1 + bw
-                y2    = y1 + bh
-                conf  = round(rng.uniform(max(conf_threshold + 0.02, 0.30), 0.96), 3)
-                name  = CLASS_NAMES[cls]
+progress = st.progress(0, text="Running inference…")
+for i, uf in enumerate(uploaded_files):
+    img = Image.open(uf).convert("RGB")
+    img_array = np.array(img)
+    annotated, detections = run_inference(model, img_array, conf_threshold)
+    results_per_image.append((uf.name, img_array, annotated, detections))
+    all_detections.extend(detections)
+    progress.progress((i + 1) / len(uploaded_files), text=f"Processed {i+1}/{len(uploaded_files)}")
 
-                # Simple overlap check
-                overlap = False
-                for _, _, _, ex1, ey1, ex2, ey2 in fake_boxes:
-                    ix = max(0, min(x2, ex2) - max(x1, ex1))
-                    iy = max(0, min(y2, ey2) - max(y1, ey1))
-                    if ix * iy > 0.45 * bw * bh:
-                        overlap = True
-                        break
-                if not overlap:
-                    fake_boxes.append((cls, name, conf, x1, y1, x2, y2))
+progress.empty()
 
-            # Draw detections
-            fig_det, ax_det = plt.subplots(figsize=(12, 8))
-            fig_det.patch.set_facecolor("#0e1117")
-            ax_det.set_facecolor("#0e1117")
-            ax_det.imshow(image)
-            for cls, name, conf, x1, y1, x2, y2 in fake_boxes:
-                color = CLASS_COLORS.get(name, "#fff")
-                rect  = mpatches.FancyBboxPatch(
-                    (x1, y1), x2 - x1, y2 - y1,
-                    boxstyle="round,pad=2", linewidth=2.5,
-                    edgecolor=color, facecolor=color, alpha=0.08
-                )
-                ax_det.add_patch(rect)
-                # Solid border on top
-                border = mpatches.FancyBboxPatch(
-                    (x1, y1), x2 - x1, y2 - y1,
-                    boxstyle="round,pad=2", linewidth=2.5,
-                    edgecolor=color, facecolor="none"
-                )
-                ax_det.add_patch(border)
-                label = f"{CLASS_EMOJIS.get(name,'')} {name.replace('_',' ')} {conf:.2f}"
-                label_y = y1 - 8 if y1 > 20 else y2 + 4
-                ax_det.text(x1, label_y, label, fontsize=8.5, color="white",
-                            fontweight="bold", va="bottom" if y1 > 20 else "top",
-                            bbox=dict(facecolor=color, alpha=0.88,
-                                      boxstyle="round,pad=2", edgecolor="none"))
-            ax_det.axis("off")
-            ax_det.set_title(
-                "YOLOv8 Road Damage Detections  •  Demo Mode",
-                color="#c9d1d9", fontsize=13, pad=10
-            )
-            plt.tight_layout(pad=0)
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary metrics
+# ─────────────────────────────────────────────────────────────────────────────
+total_det = len(all_detections)
+avg_conf = np.mean([d["conf"] for d in all_detections]) if all_detections else 0
+unique_cls = len(set(d["label"] for d in all_detections))
+high_sev = sum(1 for d in all_detections if SEVERITY_MAP[d["label"]] == "High")
 
-            st.markdown('<div class="section-header"><h2>🖼️ Detection Result</h2></div>',
-                        unsafe_allow_html=True)
-            st.pyplot(fig_det, use_container_width=True)
-            plt.close(fig_det)
+c1, c2, c3, c4 = st.columns(4)
+for col, label, value, suffix in [
+    (c1, "Total Detections", total_det, ""),
+    (c2, "Avg Confidence", f"{avg_conf:.2f}", ""),
+    (c3, "Unique Classes", unique_cls, "/ 4"),
+    (c4, "High Severity", high_sev, "defects"),
+]:
+    col.markdown(
+        f'<div class="metric-card">'
+        f'<div class="metric-label">{label}</div>'
+        f'<div class="metric-value">{value}<small style="font-size:0.9rem;color:#a0aec0"> {suffix}</small></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-image results
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("📸 Detection Results")
+
+for fname, orig, annotated, detections in results_per_image:
+    with st.expander(f"🖼 {fname}  ·  {len(detections)} detection(s)", expanded=True):
+        col_orig, col_ann = st.columns(2)
+        with col_orig:
+            st.markdown("**Original**")
+            st.image(orig, use_container_width=True)
+        with col_ann:
+            st.markdown("**Annotated**")
+            st.image(annotated, use_container_width=True)
+
+        if detections:
+            st.markdown("**Detection Details**")
+            header = "| # | Class | Confidence | Severity | BBox (x1,y1,x2,y2) |"
+            divider = "|---|-------|-----------|----------|---------------------|"
             rows = []
-            for i, (cls, name, conf, x1, y1, x2, y2) in enumerate(fake_boxes):
-                rows.append({
-                    "#": i + 1, "Class": name.replace("_", " ").title(),
-                    "Confidence": conf, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                    "Width (px)": x2 - x1, "Height (px)": y2 - y1,
-                })
-            df = pd.DataFrame(rows)
-
+            for j, d in enumerate(detections, 1):
+                sev = SEVERITY_MAP[d["label"]]
+                sev_colored = f"<span style='color:{SEVERITY_COLOR[sev]}'>{sev}</span>"
+                bb = d["bbox"]
+                rows.append(
+                    f"| {j} | {d['label']} | `{d['conf']:.3f}` | {sev} | "
+                    f"{bb[0]},{bb[1]},{bb[2]},{bb[3]} |"
+                )
+            st.markdown("\n".join([header, divider] + rows))
         else:
-            model, err = load_model(MODEL_PATH)
-            if err:
-                st.error(f"Failed to load model: {err}")
-                st.stop()
+            st.success("✅ No road damage detected in this image.")
 
-            with st.spinner("Running inference…"):
-                t0     = time.time()
-                result = run_inference(model, image, conf_threshold, iou_threshold)
-                elapsed = time.time() - t0
+# ─────────────────────────────────────────────────────────────────────────────
+# Analytics & Plots
+# ─────────────────────────────────────────────────────────────────────────────
+if all_detections:
+    st.markdown("---")
+    st.subheader("📊 Analytics & Plots")
 
-            st.success(f"Inference completed in **{elapsed * 1000:.1f} ms**")
-            fig_det = draw_detections(image, result, conf_threshold)
-            st.markdown('<div class="section-header"><h2>🖼️ Detection Result</h2></div>', unsafe_allow_html=True)
-            st.pyplot(fig_det, use_container_width=True)
-            plt.close(fig_det)
-            df = detections_to_df(result)
+    # Row 1: Bar + Pie
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
+        fig = plot_detection_bar(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
+    with r1c2:
+        fig = plot_class_pie(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
 
-        # Detection Summary
-        st.markdown('<div class="section-header"><h2>📋 Detection Summary</h2></div>', unsafe_allow_html=True)
+    # Row 2: Confidence + Area
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
+        fig = plot_confidence_dist(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
+    with r2c2:
+        fig = plot_area_histogram(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
 
-        if df.empty:
-            st.info("No damage detected above the confidence threshold. Try lowering the slider.")
-        else:
-            # Count cards
-            total    = len(df)
-            n_cols   = st.columns(5)
-            n_cols[0].metric("Total Detections", total)
-            for i, cls in enumerate(CLASS_NAMES):
-                cnt = (df["Class"] == cls.replace("_", " ").title()).sum()
-                n_cols[i + 1].metric(CLASS_EMOJIS[cls] + " " + cls.replace("_", " ").title(), cnt)
+    # Row 3: Confusion matrix + Radar
+    r3c1, r3c2 = st.columns(2)
+    with r3c1:
+        fig = plot_pseudo_confusion_matrix(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
+    with r3c2:
+        fig = plot_severity_gauge(all_detections)
+        if fig:
+            st.pyplot(fig)
+            plt.close(fig)
 
-            # Table
-            st.dataframe(
-                df.style.format({"Confidence": "{:.3f}"}),
-                use_container_width=True,
-                hide_index=True,
-            )
+    # ─────────────────────────────────────────────────────────────────────────
+    # Per-class summary table
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📋 Class Summary")
 
-            # Class distribution bar chart
-            if total > 0:
-                st.markdown('<div class="section-header"><h2>📊 Class Distribution</h2></div>', unsafe_allow_html=True)
-                class_counts = df["Class"].value_counts().reset_index()
-                class_counts.columns = ["Class", "Count"]
-                colors_list = [CLASS_COLORS.get(c.lower().replace(" ", "_"), "#8b949e")
-                               for c in class_counts["Class"]]
-                fig_bar = px.bar(
-                    class_counts, x="Class", y="Count",
-                    color="Class",
-                    color_discrete_sequence=colors_list,
-                    title="Detected Damage Types",
-                    template="plotly_dark",
-                    text="Count",
-                )
-                fig_bar.update_traces(textposition="outside")
-                fig_bar.update_layout(
-                    paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
-                    font_color="#c9d1d9", showlegend=False, height=380,
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
+    summary_rows = []
+    for cls_id, cls_name in CLASS_NAMES.items():
+        cls_dets = [d for d in all_detections if d["label"] == cls_name]
+        if cls_dets:
+            confs = [d["conf"] for d in cls_dets]
+            areas = [d["area"] for d in cls_dets]
+            summary_rows.append({
+                "Class": cls_name,
+                "Count": len(cls_dets),
+                "Avg Conf": f"{np.mean(confs):.3f}",
+                "Max Conf": f"{np.max(confs):.3f}",
+                "Avg Area (px²)": f"{np.mean(areas):,.0f}",
+                "Severity": SEVERITY_MAP[cls_name],
+            })
 
-                # Confidence distribution
-                fig_conf = px.histogram(
-                    df, x="Confidence", nbins=15,
-                    title="Confidence Score Distribution",
-                    template="plotly_dark", color_discrete_sequence=["#58a6ff"],
-                )
-                fig_conf.update_layout(
-                    paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
-                    font_color="#c9d1d9", height=320,
-                )
-                st.plotly_chart(fig_conf, use_container_width=True)
+    if summary_rows:
+        import pandas as pd
+        df = pd.DataFrame(summary_rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    else:
-        st.info("👆 Upload a road image using the file uploader above to get started.")
-        st.markdown("""
-        <div class="info-box">
-            <b>Tips for best results:</b><br>
-            • Use clear, well-lit road surface images<br>
-            • Higher resolution images improve detection accuracy<br>
-            • Lower the confidence threshold in the sidebar to surface more detections<br>
-            • Try different images — the demo boxes are seeded from image content,
-              so each unique photo produces a different result
-        </div>
-        """, unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════
-# PAGE: METRICS
-# ═══════════════════════════════════════════════════════════
-elif page == "📊 Metrics":
-    st.title("📊 Model Performance Metrics")
-    st.markdown(
-        "Training curves, per-class performance, and confusion matrix "
-        "for the YOLOv8s road damage detector."
-    )
-    st.info("📌 Metrics below are representative values; replace with actual `results.csv` from your training run.", icon="ℹ️")
-
-    df_train = simulate_training_metrics(40)
-
-    # ── Headline metrics ──────────────────────────────────
-    st.markdown('<div class="section-header"><h2>🎯 Final Metrics (Epoch 40)</h2></div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    metrics_final = {
-        "mAP@0.5": f"{df_train['mAP50'].iloc[-1]:.3f}",
-        "mAP@.5:.95": f"{df_train['mAP50_95'].iloc[-1]:.3f}",
-        "Precision": f"{df_train['precision'].iloc[-1]:.3f}",
-        "Recall":    f"{df_train['recall'].iloc[-1]:.3f}",
-    }
-    for col, (k, v) in zip([c1, c2, c3, c4], metrics_final.items()):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3>{k}</h3><p>{v}</p>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Training loss curves ───────────────────────────────
-    st.markdown('<div class="section-header"><h2>📉 Training Loss Curves</h2></div>', unsafe_allow_html=True)
-    fig_loss = go.Figure()
-    loss_cfg = [
-        ("box_loss",  "#ff6b6b", "Box Loss"),
-        ("cls_loss",  "#ffd93d", "Class Loss"),
-        ("dfl_loss",  "#6bcb77", "DFL Loss"),
-    ]
-    for col_key, color, label in loss_cfg:
-        fig_loss.add_trace(go.Scatter(
-            x=df_train["epoch"], y=df_train[col_key],
-            mode="lines", name=label,
-            line=dict(color=color, width=2),
-        ))
-    fig_loss.update_layout(
-        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
-        font_color="#c9d1d9", height=380,
-        xaxis_title="Epoch", yaxis_title="Loss",
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1),
-    )
-    st.plotly_chart(fig_loss, use_container_width=True)
-
-    # ── Precision / Recall / mAP curves ───────────────────
-    st.markdown('<div class="section-header"><h2>📈 Detection Metrics over Epochs</h2></div>', unsafe_allow_html=True)
-    fig_met = go.Figure()
-    metric_cfg = [
-        ("precision", "#58a6ff", "Precision"),
-        ("recall",    "#6bcb77", "Recall"),
-        ("mAP50",     "#ffd93d", "mAP@0.5"),
-        ("mAP50_95",  "#ff6b6b", "mAP@0.5:0.95"),
-    ]
-    for col_key, color, label in metric_cfg:
-        fig_met.add_trace(go.Scatter(
-            x=df_train["epoch"], y=df_train[col_key],
-            mode="lines", name=label,
-            line=dict(color=color, width=2),
-        ))
-    fig_met.update_layout(
-        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
-        font_color="#c9d1d9", height=380,
-        xaxis_title="Epoch", yaxis_title="Score",
-        yaxis=dict(range=[0, 1.05]),
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1),
-    )
-    st.plotly_chart(fig_met, use_container_width=True)
-
-    # ── Per-class metrics table + radar ───────────────────
-    st.markdown('<div class="section-header"><h2>🏷️ Per-Class Performance</h2></div>', unsafe_allow_html=True)
-    df_cls = per_class_metrics()
-
-    col_tbl, col_radar = st.columns([1, 1])
-
-    with col_tbl:
-        st.dataframe(
-            df_cls.style
-            .format({"Precision": "{:.2f}", "Recall": "{:.2f}",
-                     "mAP@0.5": "{:.2f}", "mAP@.5:.95": "{:.2f}"})
-            .background_gradient(cmap="Blues", subset=["mAP@0.5"]),
-            use_container_width=True, hide_index=True,
-        )
-
-    with col_radar:
-        categories = ["Precision", "Recall", "mAP@0.5"]
-        fig_radar   = go.Figure()
-        for _, row in df_cls.iterrows():
-            color = list(CLASS_COLORS.values())[list(df_cls["Class"]).index(row["Class"])]
-            vals  = [row["Precision"], row["Recall"], row["mAP@0.5"]]
-            fig_radar.add_trace(go.Scatterpolar(
-                r=vals + [vals[0]], theta=categories + [categories[0]],
-                mode="lines+markers", name=row["Class"],
-                line=dict(color=color, width=2),
-                marker=dict(size=6),
-            ))
-        fig_radar.update_layout(
-            polar=dict(
-                bgcolor="#161b22",
-                radialaxis=dict(visible=True, range=[0, 1], color="#8b949e",
-                                gridcolor="#30363d"),
-                angularaxis=dict(color="#8b949e", gridcolor="#30363d"),
-            ),
-            paper_bgcolor="#0e1117", font_color="#c9d1d9",
-            legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1),
-            height=380, title="Per-Class Radar",
-        )
-        st.plotly_chart(fig_radar, use_container_width=True)
-
-    # ── Confusion matrix ──────────────────────────────────
-    st.markdown('<div class="section-header"><h2>🔁 Confusion Matrix</h2></div>', unsafe_allow_html=True)
-    fig_cm = confusion_matrix_fig()
-    st.pyplot(fig_cm, use_container_width=True)
-    plt.close(fig_cm)
-
-    # ── Precision-Recall curve ────────────────────────────
-    st.markdown('<div class="section-header"><h2>📐 Precision–Recall Curves</h2></div>', unsafe_allow_html=True)
-    fig_pr = go.Figure()
-    rng_pr = np.random.default_rng(7)
-    cls_ap = {"pothole": 0.73, "longitudinal_crack": 0.59,
-              "transverse_crack": 0.56, "alligator_crack": 0.65}
-    for cls_name, ap in cls_ap.items():
-        recall_pts    = np.linspace(0, 1, 100)
-        precision_pts = np.clip(ap + 0.15 * np.cos(recall_pts * np.pi) +
-                                rng_pr.normal(0, 0.02, 100), 0, 1)
-        fig_pr.add_trace(go.Scatter(
-            x=recall_pts, y=precision_pts,
-            mode="lines", name=f"{cls_name} (AP={ap:.2f})",
-            line=dict(color=CLASS_COLORS[cls_name], width=2),
-        ))
-    fig_pr.update_layout(
-        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
-        font_color="#c9d1d9", height=380,
-        xaxis_title="Recall", yaxis_title="Precision",
-        xaxis=dict(range=[0, 1]), yaxis=dict(range=[0, 1.05]),
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d", borderwidth=1),
-        title="Precision–Recall Curve per Class",
-    )
-    st.plotly_chart(fig_pr, use_container_width=True)
-
-    # ── Download training log ─────────────────────────────
-    csv_data = df_train.to_csv(index=False).encode()
-    st.download_button(
-        "⬇️ Download Training Metrics CSV",
-        data=csv_data,
-        file_name="training_metrics.csv",
-        mime="text/csv",
-    )
-
-# ═══════════════════════════════════════════════════════════
-# PAGE: ABOUT
-# ═══════════════════════════════════════════════════════════
-elif page == "ℹ️ About":
-    st.title("ℹ️ About This Project")
-
-    st.markdown("""
-    ## Road Damage Detection using YOLOv8
-
-    This project applies computer vision to the problem of automated road inspection.
-    Using a fine-tuned **YOLOv8s** model on a real-world road damage dataset,
-    the system can identify and classify four types of pavement damage in uploaded images.
-
-    ---
-
-    ### 🎯 Objective
-    Automate road surface inspection to reduce manual effort, improve repair prioritization,
-    and enable scalable pavement health monitoring.
-
-    ---
-
-    ### 🧠 Model
-    | Property | Value |
-    |---|---|
-    | Architecture | YOLOv8s (Ultralytics) |
-    | Backbone | CSPDarknet |
-    | Neck | PAN-FPN |
-    | Head | Decoupled, anchor-free |
-    | Input size | 640 × 640 |
-    | Parameters | ~11.2M |
-
-    ---
-
-    ### 📦 Dataset
-    - **Source:** Kaggle — Road Damage Dataset
-    - **Format:** YOLO annotation format (`.txt` files)
-    - **Split:** 80% train / 20% validation
-    - **Classes:** Pothole, Longitudinal Crack, Transverse Crack, Alligator Crack
-
-    ---
-
-    ### 🔧 Training Setup
-    | Hyperparameter | Value |
-    |---|---|
-    | Epochs | 100 |
-    | Batch size | 8 |
-    | Optimizer | SGD |
-    | Learning rate | 0.001 |
-    | Momentum | 0.937 |
-    | Weight decay | 0.0005 |
-    | Early stopping | Patience = 10 |
-
-    ---
-
-    ### 📚 References
-    - [Ultralytics YOLOv8 Docs](https://docs.ultralytics.com)
-    - [Kaggle Road Damage Dataset](https://www.kaggle.com/datasets/alvarobasily/road-damage)
-    - Redmon et al., *You Only Look Once* (original YOLO paper)
-    """)
+else:
+    st.info("No detections found across all uploaded images at the current confidence threshold. "
+            "Try lowering the threshold in the sidebar.")
