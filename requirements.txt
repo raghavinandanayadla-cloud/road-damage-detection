@@ -1,32 +1,8 @@
-# ─────────────────────────────────────────────────────────────
-# Road Damage Detection — YOLOv8
-# Requirements
-# ─────────────────────────────────────────────────────────────
-
-# Core ML / Detection
-ultralytics>=8.2.0          # YOLOv8 training, inference, and metrics
-torch>=2.0.0                # PyTorch backend
-torchvision>=0.15.0         # Vision utilities
-
-# Image processing
-opencv-python>=4.8.0        # Image I/O and preprocessing
-Pillow>=10.0.0              # Image loading and display
-
-# Streamlit app
-streamlit>=1.35.0           # Web app framework
-streamlit-option-menu>=0.3.6 # Sidebar navigation
-
-# Data & Visualization
-numpy>=1.24.0               # Numerical computations
-pandas>=2.0.0               # DataFrames for metrics tables
-matplotlib>=3.7.0           # Static charts
-seaborn>=0.12.0             # Heatmaps (confusion matrix)
-plotly>=5.18.0              # Interactive charts in Streamlit
-
-# Utilities
-PyYAML>=6.0                 # YAML config parsing
-tqdm>=4.66.0                # Progress bars
-scipy>=1.11.0               # Statistical computations
-
-# Kaggle dataset download (optional, for retraining)
-kagglehub>=0.2.0
+streamlit>=1.32.0
+ultralytics>=8.0.0
+opencv-python-headless>=4.9.0
+Pillow>=10.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.13.0
+pandas>=2.0.0
