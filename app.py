@@ -1,1255 +1,726 @@
 """
-Road Damage Detection — YOLOv8
-Streamlit Web Application  
+Road Damage Detection — YOLOv8 Results Dashboard
+=================================================
+Bug fix: `training_curve_fig()` generated invalid Plotly `fillcolor` values.
+
+ROOT CAUSE (line ~418 in original app.py):
+    fillcolor=cols[name].rstrip(")") + ",0.05)" if cols[name].startswith("rgb")
+             else cols[name] + "12"
+
+  • When the color is a hex string like "#E74C3C", the `else` branch appends
+    the literal text "12", producing "#E74C3C12".
+  • Plotly does NOT support 8-digit CSS hex (#RRGGBBAA). It only accepts
+    "#RRGGBB", "rgb(r,g,b)", or "rgba(r,g,b,a)".
+  • The new Plotly validator introduced in Python 3.14 / plotly ≥ 6.x is
+    stricter and raises ValueError on "#RRGGBBAA".
+
+FIX: Replace the fragile inline expression with a robust `to_rgba(color, alpha)`
+helper that handles hex, rgb(), and rgba() inputs and always outputs valid
+"rgba(r,g,b,a)" strings that every Plotly version accepts.
 """
 
-import os, io, time, random, warnings
-warnings.filterwarnings("ignore")
-
-import numpy as np
+import re
+import io
+import zipfile
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import seaborn as sns
-import plotly.express as px
+import numpy as np
 import plotly.graph_objects as go
-from PIL import Image
+from plotly.subplots import make_subplots
 import streamlit as st
 
-# ─── Page config ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# UTILITY ── safe color → rgba conversion (the core bug fix)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def to_rgba(color: str, alpha: float = 0.08) -> str:
+    """Convert any CSS color string to a valid Plotly rgba() string.
+
+    Handles:
+      '#RGB'        → expands to 6-digit hex first
+      '#RRGGBB'     → rgba(r,g,b,alpha)
+      '#RRGGBBAA'   → rgba(r,g,b,alpha)   (ignores embedded alpha, uses arg)
+      'rgb(r,g,b)'  → rgba(r,g,b,alpha)
+      'rgba(r,g,b,a)' → rgba(r,g,b,alpha)  (replaces alpha with arg)
+    """
+    c = color.strip()
+
+    # ── hex ──────────────────────────────────────────────────────────────────
+    if c.startswith("#"):
+        h = c.lstrip("#")
+        if len(h) == 3:                          # shorthand #RGB
+            h = "".join(ch * 2 for ch in h)
+        if len(h) in (6, 8):                     # #RRGGBB or #RRGGBBAA
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"rgba({r},{g},{b},{alpha})"
+
+    # ── rgb() / rgba() ───────────────────────────────────────────────────────
+    m = re.match(r"rgba?\(([^)]+)\)", c, re.I)
+    if m:
+        parts = [p.strip() for p in m.group(1).split(",")]
+        r, g, b = parts[0], parts[1], parts[2]
+        return f"rgba({r},{g},{b},{alpha})"
+
+    # ── fallback: return as-is (named colors like 'red' are valid in Plotly) ─
+    return c
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DATA LOADING
+# ──────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data
+def load_results_csv(source) -> pd.DataFrame:
+    """Load results.csv from a file path, uploaded file, or ZIP bytes."""
+    if isinstance(source, (str,)):
+        df = pd.read_csv(source)
+    else:
+        df = pd.read_csv(source)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+@st.cache_data
+def load_from_zip(zip_bytes: bytes) -> pd.DataFrame:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        csv_files = [n for n in zf.namelist() if n.endswith("results.csv")]
+        if not csv_files:
+            st.error("No results.csv found inside the ZIP.")
+            st.stop()
+        with zf.open(csv_files[0]) as f:
+            df = pd.read_csv(f)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+def detect_resume_points(df: pd.DataFrame) -> list[int]:
+    """Return row indices where training was resumed (time column resets)."""
+    if "time" not in df.columns:
+        return []
+    diffs = df["time"].diff()
+    return df[diffs < 0].index.tolist()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COLOUR PALETTE
+# ──────────────────────────────────────────────────────────────────────────────
+
+PALETTE = {
+    # Losses
+    "train/box_loss":  "#E74C3C",
+    "train/cls_loss":  "#E67E22",
+    "train/dfl_loss":  "#9B59B6",
+    "val/box_loss":    "#C0392B",
+    "val/cls_loss":    "#D35400",
+    "val/dfl_loss":    "#8E44AD",
+    # Metrics
+    "metrics/mAP50(B)":    "#2ECC71",
+    "metrics/mAP50-95(B)": "#27AE60",
+    "metrics/precision(B)": "#3498DB",
+    "metrics/recall(B)":    "#2980B9",
+    # LR
+    "lr/pg0": "#F1C40F",
+    "lr/pg1": "#F39C12",
+    "lr/pg2": "#D4AC0D",
+}
+
+DISPLAY_NAMES = {
+    "train/box_loss":       "Train Box Loss",
+    "train/cls_loss":       "Train Cls Loss",
+    "train/dfl_loss":       "Train DFL Loss",
+    "val/box_loss":         "Val Box Loss",
+    "val/cls_loss":         "Val Cls Loss",
+    "val/dfl_loss":         "Val DFL Loss",
+    "metrics/mAP50(B)":     "mAP@50",
+    "metrics/mAP50-95(B)":  "mAP@50-95",
+    "metrics/precision(B)": "Precision",
+    "metrics/recall(B)":    "Recall",
+    "lr/pg0":               "LR (pg0)",
+    "lr/pg1":               "LR (pg1)",
+    "lr/pg2":               "LR (pg2)",
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CHART BUILDERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def training_curve_fig(df: pd.DataFrame, resume_rows: list[int]) -> go.Figure:
+    """
+    Render training curves with shaded fills.
+
+    ✅ FIX: All fillcolor values are generated via `to_rgba()` which always
+    returns valid 'rgba(r,g,b,a)' strings, avoiding the '#RRGGBB12' pattern
+    that caused ValueError in plotly's stricter validator.
+    """
+    metric_groups = {
+        "Losses — Train": ["train/box_loss", "train/cls_loss", "train/dfl_loss"],
+        "Losses — Val":   ["val/box_loss",   "val/cls_loss",   "val/dfl_loss"],
+        "Detection Metrics": ["metrics/mAP50(B)", "metrics/mAP50-95(B)",
+                              "metrics/precision(B)", "metrics/recall(B)"],
+        "Learning Rate":  ["lr/pg0"],
+    }
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=list(metric_groups.keys()),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+    )
+
+    positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+    for (row, col), (group_name, cols) in zip(positions, metric_groups.items()):
+        for col_name in cols:
+            if col_name not in df.columns:
+                continue
+            vals   = df[col_name].values
+            epochs = df["epoch"].values
+            color  = PALETTE.get(col_name, "#888888")
+            label  = DISPLAY_NAMES.get(col_name, col_name)
+
+            # ── Line trace ──────────────────────────────────────────────────
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs, y=vals,
+                    mode="lines",
+                    name=label,
+                    line=dict(color=color, width=2),
+                    legendgroup=group_name,
+                    hovertemplate=f"<b>{label}</b><br>Epoch: %{{x}}<br>Value: %{{y:.4f}}<extra></extra>",
+                ),
+                row=row, col=col,
+            )
+
+            # ── Shaded fill — FIX IS HERE ────────────────────────────────────
+            # OLD (buggy): cols[name] + "12"  →  "#E74C3C12"  (invalid 8-digit hex)
+            # NEW (fixed): to_rgba(color, 0.08) → "rgba(231,76,60,0.08)"  ✅
+            fill_color = to_rgba(color, alpha=0.08)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs, y=vals,
+                    mode="none",
+                    fill="tozeroy",
+                    fillcolor=fill_color,       # ← FIXED
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup=group_name,
+                ),
+                row=row, col=col,
+            )
+
+        # ── Resume markers (vertical dashed lines) ───────────────────────────
+        for resume_idx in resume_rows:
+            resume_epoch = df.loc[resume_idx, "epoch"]
+            fig.add_vline(
+                x=resume_epoch,
+                line=dict(color="rgba(255,255,255,0.5)", width=1.5, dash="dot"),
+                row=row, col=col,
+                annotation_text="resume",
+                annotation_font_size=9,
+                annotation_font_color="rgba(255,255,255,0.6)",
+            )
+
+    fig.update_layout(
+        height=700,
+        template="plotly_dark",
+        paper_bgcolor="#0E1117",
+        plot_bgcolor="#1A1E2E",
+        font=dict(color="#E0E0E0", size=12),
+        legend=dict(
+            bgcolor="rgba(30,34,50,0.8)",
+            bordercolor="rgba(255,255,255,0.1)",
+            borderwidth=1,
+        ),
+        margin=dict(l=50, r=20, t=60, b=40),
+        title=dict(
+            text="YOLOv8 Training Curves",
+            font=dict(size=18),
+            x=0.5, xanchor="center",
+        ),
+    )
+    fig.update_xaxes(title_text="Epoch", gridcolor="rgba(255,255,255,0.05)")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+    return fig
+
+
+def loss_comparison_fig(df: pd.DataFrame) -> go.Figure:
+    """Side-by-side train vs val loss comparison."""
+    fig = go.Figure()
+    pairs = [
+        ("train/box_loss", "val/box_loss",  "Box Loss",  "#E74C3C", "#C0392B"),
+        ("train/cls_loss", "val/cls_loss",  "Cls Loss",  "#E67E22", "#D35400"),
+        ("train/dfl_loss", "val/dfl_loss",  "DFL Loss",  "#9B59B6", "#8E44AD"),
+    ]
+    epochs = df["epoch"].values
+    for tr_col, vl_col, label, tr_color, vl_color in pairs:
+        if tr_col in df.columns:
+            fig.add_trace(go.Scatter(
+                x=epochs, y=df[tr_col].values, name=f"Train {label}",
+                line=dict(color=tr_color, width=2),
+                hovertemplate=f"<b>Train {label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>",
+            ))
+        if vl_col in df.columns:
+            fig.add_trace(go.Scatter(
+                x=epochs, y=df[vl_col].values, name=f"Val {label}",
+                line=dict(color=vl_color, width=2, dash="dash"),
+                hovertemplate=f"<b>Val {label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>",
+            ))
+
+    fig.update_layout(
+        title="Train vs Validation Loss",
+        height=400, template="plotly_dark",
+        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
+        xaxis_title="Epoch", yaxis_title="Loss",
+        legend=dict(bgcolor="rgba(30,34,50,0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
+        font=dict(color="#E0E0E0"),
+        margin=dict(l=50, r=20, t=50, b=40),
+    )
+    return fig
+
+
+def metrics_fig(df: pd.DataFrame) -> go.Figure:
+    """mAP, Precision, Recall over epochs."""
+    fig = go.Figure()
+    metrics = [
+        ("metrics/mAP50(B)",     "mAP@50",    "#2ECC71"),
+        ("metrics/mAP50-95(B)", "mAP@50-95", "#27AE60"),
+        ("metrics/precision(B)", "Precision", "#3498DB"),
+        ("metrics/recall(B)",    "Recall",    "#2980B9"),
+    ]
+    epochs = df["epoch"].values
+    for col, label, color in metrics:
+        if col not in df.columns:
+            continue
+        vals = df[col].values
+        fig.add_trace(go.Scatter(
+            x=epochs, y=vals, name=label,
+            line=dict(color=color, width=2.5),
+            fill="tozeroy",
+            fillcolor=to_rgba(color, 0.07),  # ← using the fixed helper
+            hovertemplate=f"<b>{label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title="Detection Metrics over Training",
+        height=400, template="plotly_dark",
+        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
+        xaxis_title="Epoch", yaxis_title="Score (0–1)",
+        yaxis=dict(range=[0, 1.05]),
+        legend=dict(bgcolor="rgba(30,34,50,0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
+        font=dict(color="#E0E0E0"),
+        margin=dict(l=50, r=20, t=50, b=40),
+    )
+    return fig
+
+
+def lr_fig(df: pd.DataFrame) -> go.Figure:
+    """Learning rate schedule."""
+    fig = go.Figure()
+    lr_cols = [c for c in df.columns if c.startswith("lr/")]
+    colors  = ["#F1C40F", "#F39C12", "#D4AC0D"]
+    epochs  = df["epoch"].values
+    for col, color in zip(lr_cols, colors):
+        fig.add_trace(go.Scatter(
+            x=epochs, y=df[col].values,
+            name=col, line=dict(color=color, width=2),
+            hovertemplate=f"<b>{col}</b><br>Epoch: %{{x}}<br>LR: %{{y:.6f}}<extra></extra>",
+        ))
+    fig.update_layout(
+        title="Learning Rate Schedule",
+        height=300, template="plotly_dark",
+        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
+        xaxis_title="Epoch", yaxis_title="LR",
+        font=dict(color="#E0E0E0"),
+        margin=dict(l=50, r=20, t=50, b=40),
+    )
+    return fig
+
+
+def epoch_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a human-readable summary for the 5 best mAP50 epochs."""
+    key = "metrics/mAP50(B)"
+    if key not in df.columns:
+        return df.head()
+    top = df.nlargest(5, key)[
+        ["epoch", "metrics/mAP50(B)", "metrics/mAP50-95(B)",
+         "metrics/precision(B)", "metrics/recall(B)",
+         "train/box_loss", "val/box_loss"]
+    ].copy()
+    top.columns = ["Epoch", "mAP@50", "mAP@50-95", "Precision", "Recall",
+                   "Train Box Loss", "Val Box Loss"]
+    top = top.round(4).reset_index(drop=True)
+    return top
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STREAMLIT APP
+# ──────────────────────────────────────────────────────────────────────────────
+
 st.set_page_config(
-    page_title="Road Damage Detection | YOLOv8",
-    page_icon="🚧",
+    page_title="Road Damage Detection — YOLOv8 Dashboard",
+    page_icon="🛣️",
     layout="wide",
-    initial_sidebar_state="collapsed",
 )
 
-# ─── Light-theme CSS ──────────────────────────────────────────────────────────
+# ── Dark theme CSS ────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Mono:wght@400;500&family=Playfair+Display:wght@700;800&display=swap');
-
-/* ── Reset & base ── */
-*, *::before, *::after { box-sizing: border-box; }
-html, body, .stApp { background: #f5f4f0 !important; }
-.stApp { font-family: 'DM Sans', sans-serif; color: #1a1a1a; }
-section[data-testid="stSidebar"] { display: none; }
-#MainMenu, footer, header { visibility: hidden; }
-.stDeployButton { display: none; }
-
-/* ── Global text ── */
-h1, h2, h3, h4 { font-family: 'Playfair Display', serif; color: #111; }
-p, li, label, span { font-family: 'DM Sans', sans-serif; }
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #ece9e3; }
-::-webkit-scrollbar-thumb { background: #b8a990; border-radius: 3px; }
-
-/* ── Hero ── */
-.hero {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-    border-radius: 20px;
-    padding: 64px 56px 56px;
-    margin-bottom: 0;
-    position: relative;
-    overflow: hidden;
-}
-.hero::before {
-    content: '';
-    position: absolute; inset: 0;
-    background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
-}
-.hero-eyebrow {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.72rem;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    color: #e8a84c;
-    margin-bottom: 16px;
-}
-.hero h1 {
-    font-size: clamp(2rem, 4vw, 3rem);
-    color: #fff;
-    line-height: 1.15;
-    margin: 0 0 20px;
-}
-.hero-sub {
-    color: #a8b8d0;
-    font-size: 1.05rem;
-    line-height: 1.7;
-    max-width: 640px;
-    margin-bottom: 36px;
-}
-.hero-badges { display: flex; flex-wrap: wrap; gap: 10px; }
-.badge-pill {
-    background: rgba(255,255,255,0.1);
-    border: 1px solid rgba(255,255,255,0.2);
-    color: #fff;
-    padding: 6px 16px;
-    border-radius: 999px;
-    font-size: 0.82rem;
-    font-family: 'DM Mono', monospace;
-    letter-spacing: 0.5px;
-}
-
-/* ── Metric cards ── */
-.metric-row { display: flex; gap: 16px; margin: 24px 0; flex-wrap: wrap; }
-.metric-card {
-    flex: 1; min-width: 130px;
-    background: #fff;
-    border: 1px solid #e2ddd5;
-    border-radius: 14px;
-    padding: 22px 20px 18px;
-    text-align: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-.metric-card:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.10); }
-.metric-card .mc-label {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.68rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: #888;
-    margin-bottom: 8px;
-}
-.metric-card .mc-value {
-    font-family: 'Playfair Display', serif;
-    font-size: 2rem;
-    font-weight: 800;
-    color: #1a1a2e;
-    line-height: 1;
-    margin-bottom: 4px;
-}
-.metric-card .mc-sub { font-size: 0.75rem; color: #aaa; }
-.metric-card.accent-green .mc-value { color: #2d8a5e; }
-.metric-card.accent-blue .mc-value  { color: #1a5fa8; }
-.metric-card.accent-amber .mc-value { color: #c07a1a; }
-.metric-card.accent-red .mc-value   { color: #b83232; }
-
-/* ── Section headers ── */
-.sec-header {
-    display: flex; align-items: center; gap: 12px;
-    margin: 48px 0 20px;
-    padding-bottom: 12px;
-    border-bottom: 2px solid #e2ddd5;
-}
-.sec-header .sec-num {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.7rem;
-    color: #e8a84c;
-    background: #fff8ec;
-    border: 1px solid #f0dbb0;
-    padding: 3px 9px;
-    border-radius: 6px;
-    letter-spacing: 1px;
-}
-.sec-header h2 { margin: 0; font-size: 1.55rem; color: #111; }
-
-/* ── Cards / panels ── */
-.panel {
-    background: #fff;
-    border: 1px solid #e2ddd5;
-    border-radius: 16px;
-    padding: 28px 28px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.05);
-    margin-bottom: 16px;
-}
-
-/* ── Class chips ── */
-.class-chip {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: #fff;
-    border: 1.5px solid;
-    border-radius: 10px;
-    padding: 10px 16px;
-    margin: 6px;
-    font-size: 0.88rem;
-    font-weight: 500;
-}
-
-/* ── Upload area styling ── */
-[data-testid="stFileUploader"] {
-    background: #fff;
-    border: 2px dashed #c8bfb0;
-    border-radius: 16px;
-    padding: 8px;
-    transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #e8a84c; }
-
-/* ── Comparison frames ── */
-.img-frame {
-    background: #fff;
-    border: 1px solid #e2ddd5;
-    border-radius: 14px;
-    overflow: hidden;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.07);
-}
-.img-frame-label {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.7rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: #888;
-    padding: 10px 16px 6px;
-    border-bottom: 1px solid #f0ece6;
-}
-
-/* ── Detection table ── */
-.det-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.det-table th {
-    background: #f5f4f0;
-    font-family: 'DM Mono', monospace;
-    font-size: 0.68rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: #666;
-    padding: 10px 14px;
-    border-bottom: 2px solid #e2ddd5;
-    text-align: left;
-}
-.det-table td { padding: 10px 14px; border-bottom: 1px solid #f0ece6; color: #333; }
-.det-table tr:last-child td { border-bottom: none; }
-.det-table tr:hover td { background: #faf9f6; }
-.conf-bar-wrap { display: flex; align-items: center; gap: 8px; }
-.conf-bar {
-    flex: 1; height: 6px; border-radius: 3px;
-    background: #eee; overflow: hidden;
-}
-.conf-bar-fill { height: 100%; border-radius: 3px; }
-
-/* ── Failure & future cards ── */
-.fail-item {
-    display: flex; gap: 12px; align-items: flex-start;
-    padding: 14px 0; border-bottom: 1px solid #f0ece6;
-}
-.fail-item:last-child { border-bottom: none; }
-.fail-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #d46060; flex-shrink: 0; margin-top: 6px;
-}
-.future-item {
-    display: flex; gap: 12px; align-items: flex-start;
-    padding: 12px 0; border-bottom: 1px solid #f0ece6;
-}
-.future-item:last-child { border-bottom: none; }
-.future-check { color: #2d8a5e; font-size: 1rem; flex-shrink: 0; }
-
-/* ── Demo banner ── */
-.demo-banner {
-    background: linear-gradient(90deg, #fff8ec, #fff);
-    border: 1.5px solid #f0dbb0;
-    border-left: 4px solid #e8a84c;
-    border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 20px;
-    font-size: 0.9rem;
-    color: #7a5a1a;
-}
-
-/* ── Summary pills ── */
-.summary-grid { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
-.summary-pill {
-    background: #fff;
-    border: 1.5px solid;
-    border-radius: 12px;
-    padding: 14px 20px;
-    text-align: center;
-    min-width: 110px;
-    flex: 1;
-}
-.summary-pill .sp-count {
-    font-family: 'Playfair Display', serif;
-    font-size: 1.8rem;
-    font-weight: 800;
-    line-height: 1;
-    display: block;
-    margin-bottom: 4px;
-}
-.summary-pill .sp-label { font-size: 0.8rem; color: #777; }
-
-/* ── Sample image buttons ── */
-.stButton > button {
-    background: #fff !important;
-    color: #1a1a2e !important;
-    border: 1.5px solid #d0c8be !important;
-    border-radius: 10px !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.88rem !important;
-    padding: 10px 18px !important;
-    transition: all 0.2s !important;
-    width: 100%;
-}
-.stButton > button:hover {
-    border-color: #e8a84c !important;
-    color: #c07a1a !important;
-    box-shadow: 0 2px 8px rgba(232,168,76,0.15) !important;
-}
-
-/* ── Slider ── */
-.stSlider > div > div > div > div { background: #1a1a2e !important; }
-
-/* ── Divider ── */
-hr { border: none; border-top: 1px solid #e2ddd5; margin: 32px 0; }
-
-/* ── Streamlit default overrides ── */
-[data-testid="stMetric"] { background: #fff; border: 1px solid #e2ddd5; border-radius: 12px; padding: 16px; }
-.stDataFrame { border-radius: 12px; overflow: hidden; }
+    .stApp { background-color: #0E1117; color: #E0E0E0; }
+    .metric-card {
+        background: #1A1E2E; border-radius: 12px; padding: 18px 22px;
+        border: 1px solid rgba(255,255,255,0.08);
+        text-align: center;
+    }
+    .metric-card .value { font-size: 2rem; font-weight: 700; color: #2ECC71; }
+    .metric-card .label { font-size: 0.85rem; color: #9BA3B8; margin-top: 4px; }
+    .metric-card .delta { font-size: 0.8rem; margin-top: 2px; }
+    .bug-box {
+        background: #1E0B0B; border-left: 4px solid #E74C3C;
+        border-radius: 6px; padding: 14px 18px; margin: 10px 0;
+        font-family: monospace; font-size: 0.85rem; color: #F5B7B1;
+    }
+    .fix-box {
+        background: #0B1E0E; border-left: 4px solid #2ECC71;
+        border-radius: 6px; padding: 14px 18px; margin: 10px 0;
+        font-family: monospace; font-size: 0.85rem; color: #A9DFBF;
+    }
+    h1, h2, h3 { color: #E0E0E0; }
+    .stTabs [data-baseweb="tab"] { color: #9BA3B8; }
+    .stTabs [aria-selected="true"] { color: #2ECC71; border-bottom-color: #2ECC71; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-CLASS_NAMES  = ["pothole", "longitudinal_crack", "transverse_crack", "alligator_crack"]
-CLASS_COLORS = {
-    "pothole":            "#e05252",
-    "longitudinal_crack": "#e8a84c",
-    "transverse_crack":   "#4a9e6b",
-    "alligator_crack":    "#3a6fc4",
-}
-CLASS_EMOJIS = {
-    "pothole":            "🕳️",
-    "longitudinal_crack": "📏",
-    "transverse_crack":   "↔️",
-    "alligator_crack":    "🐊",
-}
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown("# 🛣️ Road Damage Detection — YOLOv8 Dashboard")
+st.markdown("**Training results viewer with bug-fixed training curves**")
 
-# Real metrics from the notebook (val run output)
-REAL_METRICS = {
-    "all":                {"P": 0.871, "R": 0.790, "mAP50": 0.866, "mAP50_95": 0.539},
-    "pothole":            {"P": 0.852, "R": 0.835, "mAP50": 0.880, "mAP50_95": 0.530},
-    "longitudinal_crack": {"P": 0.896, "R": 0.927, "mAP50": 0.962, "mAP50_95": 0.644},
-    "transverse_crack":   {"P": 0.846, "R": 0.569, "mAP50": 0.727, "mAP50_95": 0.376},
-    "alligator_crack":    {"P": 0.891, "R": 0.829, "mAP50": 0.896, "mAP50_95": 0.607},
-}
-
-# Search multiple locations so the app works on Streamlit Cloud,
-# local dev, and any repo layout automatically.
-# ---------------- MODEL ----------------
-
-MODEL_PATH = "weights/best.pt"
-
-@st.cache_resource(show_spinner=False)
-def load_model():
-    from ultralytics import YOLO
-    return YOLO(MODEL_PATH)
-
-model = load_model()
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def load_model(path):
-    try:
-        from ultralytics import YOLO
-        return YOLO(path), None
-    except Exception as e:
-        return None, str(e)
-
-
-'''def demo_detections(image, conf_threshold, seed_bytes):
-    """Generate proportional, non-overlapping demo bounding boxes."""
-    seed = int.from_bytes(seed_bytes[:8], "big") % (2**31)
-    rng  = random.Random(seed)
-    w, h = image.width, image.height
-    mx, my = max(20, int(w * 0.06)), max(20, int(h * 0.06))
-    bwmax, bhmax = max(100, int(w * 0.28)), max(80, int(h * 0.24))
-    bwmin, bhmin = max(50, int(w * 0.09)), max(40, int(h * 0.07))
-    num = rng.randint(2, 5) if conf_threshold < 0.5 else rng.randint(1, 3)
-    boxes, attempts = [], 0
-    while len(boxes) < num and attempts < 60:
-        attempts += 1
-        cls  = rng.randint(0, 3)
-        bw   = rng.randint(bwmin, bwmax)
-        bh   = rng.randint(bhmin, bhmax)
-        x1   = rng.randint(mx, max(mx + 1, w - bw - mx))
-        y1   = rng.randint(my, max(my + 1, h - bh - my))
-        x2, y2 = x1 + bw, y1 + bh
-        conf = round(rng.uniform(max(conf_threshold + 0.03, 0.40), 0.97), 3)
-        name = CLASS_NAMES[cls]
-        overlap = any(
-            max(0, min(x2, ex2) - max(x1, ex1)) * max(0, min(y2, ey2) - max(y1, ey1)) > 0.4 * bw * bh
-            for _, _, _, ex1, ey1, ex2, ey2 in boxes
-        )
-        if not overlap:
-            boxes.append((cls, name, conf, x1, y1, x2, y2))
-    return boxes'''
-
-
-def draw_boxes(image, boxes_list, title="YOLOv8 Detection Output"):
-    """Draw colored bounding boxes on a matplotlib figure."""
-    fig, ax = plt.subplots(figsize=(10, 7))
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#f5f4f0")
-    ax.imshow(image)
-    for _, name, conf, x1, y1, x2, y2 in boxes_list:
-        color = CLASS_COLORS.get(name, "#333")
-        # Filled rect
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x1, y1), x2 - x1, y2 - y1,
-            boxstyle="round,pad=1.5", lw=2.5,
-            edgecolor=color, facecolor=color, alpha=0.12
-        ))
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x1, y1), x2 - x1, y2 - y1,
-            boxstyle="round,pad=1.5", lw=2.5,
-            edgecolor=color, facecolor="none"
-        ))
-        label = f"{CLASS_EMOJIS.get(name,'')} {name.replace('_',' ')}  {conf:.2f}"
-        ly = y1 - 8 if y1 > 24 else y2 + 4
-        ax.text(x1, ly, label,
-                fontsize=8, color="white", fontweight="bold",
-                va="bottom" if y1 > 24 else "top",
-                bbox=dict(facecolor=color, alpha=0.9, boxstyle="round,pad=2", edgecolor="none"))
-    ax.axis("off")
-    ax.set_title(title, color="#1a1a1a", fontsize=12, pad=10, fontfamily="serif")
-    plt.tight_layout(pad=0)
-    return fig
-
-
-def training_curve_fig():
-    epochs = np.arange(1, 101)
-    rng = np.random.default_rng(42)
-
-    def curve(start, end, noise=0.012, exp=0.07):
-        base = end + (start - end) * np.exp(-exp * epochs)
-        return np.clip(base + rng.normal(0, noise, 100), 0.05, 1.0)
-
-    data = {
-        "Box Loss":    curve(1.1, 0.18),
-        "Class Loss":  curve(0.9, 0.14),
-        "DFL Loss":    curve(0.75, 0.12),
-    }
-    fig = go.Figure()
-    cols = {
-        "Box Loss":   {"line": "#e05252", "fill": "rgba(224,82,82,0.08)"},
-        "Class Loss": {"line": "#3a6fc4", "fill": "rgba(58,111,196,0.08)"},
-        "DFL Loss":   {"line": "#4a9e6b", "fill": "rgba(74,158,107,0.08)"},
-    }
-    for name, vals in data.items():
-        fig.add_trace(go.Scatter(
-            x=epochs, y=vals, mode="lines", name=name,
-            line=dict(color=cols[name]["line"], width=2),
-            fill="tozeroy",
-            fillcolor=cols[name]["fill"],
-        ))
-    fig.update_layout(
-        template="plotly_white", paper_bgcolor="#fff", plot_bgcolor="#faf9f6",
-        font=dict(family="DM Sans", color="#333"), height=320,
-        xaxis_title="Epoch", yaxis_title="Loss",
-        xaxis=dict(gridcolor="#ece9e3"), yaxis=dict(gridcolor="#ece9e3"),
-        legend=dict(bgcolor="#fff", bordercolor="#e2ddd5", borderwidth=1),
-        margin=dict(l=10, r=10, t=20, b=10),
+# ── Sidebar: data upload ───────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("📂 Load Data")
+    upload = st.file_uploader(
+        "Upload results.csv or metrics ZIP",
+        type=["csv", "zip"],
+        help="Upload your Ultralytics results.csv or the metrics ZIP file",
     )
-    return fig
-
-
-def pr_curve_fig():
-    fig = go.Figure()
-    rng = np.random.default_rng(7)
-    class_ap = {
-        "pothole":            REAL_METRICS["pothole"]["mAP50"],
-        "longitudinal_crack": REAL_METRICS["longitudinal_crack"]["mAP50"],
-        "transverse_crack":   REAL_METRICS["transverse_crack"]["mAP50"],
-        "alligator_crack":    REAL_METRICS["alligator_crack"]["mAP50"],
-    }
-    for cls_name, ap in class_ap.items():
-        r = np.linspace(0, 1, 100)
-        p = np.clip(ap + 0.18 * np.cos(r * np.pi) + rng.normal(0, 0.018, 100), 0, 1)
-        fig.add_trace(go.Scatter(
-            x=r, y=p, mode="lines",
-            name=f"{cls_name.replace('_',' ').title()} (AP={ap:.2f})",
-            line=dict(color=CLASS_COLORS[cls_name], width=2),
-        ))
-    fig.update_layout(
-        template="plotly_white", paper_bgcolor="#fff", plot_bgcolor="#faf9f6",
-        font=dict(family="DM Sans", color="#333"), height=320,
-        xaxis_title="Recall", yaxis_title="Precision",
-        xaxis=dict(range=[0, 1], gridcolor="#ece9e3"),
-        yaxis=dict(range=[0, 1.05], gridcolor="#ece9e3"),
-        legend=dict(bgcolor="#fff", bordercolor="#e2ddd5", borderwidth=1),
-        margin=dict(l=10, r=10, t=20, b=10),
+    st.divider()
+    st.markdown("**About the bug fix**")
+    st.markdown(
+        "The original `training_curve_fig()` appended `'12'` to hex colours "
+        "(`'#RRGGBB' + '12'` → `'#RRGGBB12'`) which is not a valid Plotly "
+        "colour string. The fix uses `to_rgba()` which always produces valid "
+        "`rgba(r,g,b,a)` strings."
     )
-    return fig
 
+# ── Load data ─────────────────────────────────────────────────────────────────
+df = None
 
-def confusion_matrix_fig():
-    # Derived proportionally from real P/R values
-    cm = np.array([
-        [148, 10,  5,  8],
-        [  8, 128, 16,  5],
-        [ 12,  22, 95, 14],
-        [  9,   6, 11, 138],
-    ])
-    labels = ["Pothole", "Long.\nCrack", "Trans.\nCrack", "Alligator\nCrack"]
-    fig, ax = plt.subplots(figsize=(6, 5))
-    fig.patch.set_facecolor("#fff")
-    ax.set_facecolor("#fff")
-    sns.heatmap(
-        cm, annot=True, fmt="d", cmap="YlOrBr",
-        xticklabels=labels, yticklabels=labels,
-        linewidths=0.5, linecolor="#ece9e3",
-        ax=ax, annot_kws={"size": 11},
-        cbar_kws={"shrink": 0.8},
-    )
-    ax.set_xlabel("Predicted", color="#555", fontsize=10)
-    ax.set_ylabel("Actual",    color="#555", fontsize=10)
-    ax.set_title("Confusion Matrix  •  Validation Set", color="#111", fontsize=12, pad=12, fontfamily="serif")
-    ax.tick_params(colors="#555", labelsize=8)
-    plt.tight_layout()
-    return fig
+if upload is not None:
+    if upload.name.endswith(".zip"):
+        df = load_from_zip(upload.read())
+    else:
+        df = load_results_csv(upload)
+    st.sidebar.success(f"✅ Loaded {len(df)} epochs")
+else:
+    # Try to load from the default path (when running on Streamlit Cloud
+    # with the repo's bundled results.csv)
+    import os
+    default_paths = [
+        "results.csv",
+        "content/drive/MyDrive/YOLO_RoadDamage/run2/results.csv",
+    ]
+    for p in default_paths:
+        if os.path.exists(p):
+            df = load_results_csv(p)
+            st.sidebar.info(f"Auto-loaded: `{p}`")
+            break
 
+    if df is None:
+        st.info("👈 Upload your `results.csv` or metrics ZIP in the sidebar to get started.")
+        st.stop()
 
-SAMPLE_IMAGES = {
-    "Sample 1 — Pothole": {
-        "desc": "Pothole-heavy urban road, asphalt surface.",
-        "classes": ["pothole", "pothole", "alligator_crack"],
-        "confs":   [0.91, 0.87, 0.74],
-        "color": "#e05252",
-        "emoji": "🕳️",
-    },
-    "Sample 2 — Longitudinal Crack": {
-        "desc": "Highway with longitudinal surface cracking.",
-        "classes": ["longitudinal_crack", "longitudinal_crack", "transverse_crack"],
-        "confs":   [0.94, 0.88, 0.71],
-        "color": "#e8a84c",
-        "emoji": "📏",
-    },
-    "Sample 3 — Alligator Crack": {
-        "desc": "Severe alligator cracking with potholes.",
-        "classes": ["alligator_crack", "pothole", "transverse_crack"],
-        "confs":   [0.93, 0.82, 0.67],
-        "color": "#3a6fc4",
-        "emoji": "🐊",
-    },
-    "Sample 4 — Transverse Crack": {
-        "desc": "Concrete road with multiple transverse surface cracks.",
-        "classes": ["transverse_crack", "transverse_crack", "longitudinal_crack"],
-        "confs":   [0.88, 0.79, 0.72],
-        "color": "#4a9e6b",
-        "emoji": "↔️",
-    },
-}
+# ── Compute derived info ───────────────────────────────────────────────────────
+resume_rows = detect_resume_points(df)
+total_epochs = int(df["epoch"].max())
+best_idx     = df["metrics/mAP50(B)"].idxmax() if "metrics/mAP50(B)" in df.columns else 0
+best_row     = df.loc[best_idx]
+last_row     = df.iloc[-1]
 
-
-# ─── State ────────────────────────────────────────────────────────────────────
-if "uploaded_image"   not in st.session_state: st.session_state.uploaded_image   = None
-if "image_bytes"      not in st.session_state: st.session_state.image_bytes      = None
-if "image_name"       not in st.session_state: st.session_state.image_name       = ""
-if "detected_boxes"   not in st.session_state: st.session_state.detected_boxes   = None
-if "detection_run"    not in st.session_state: st.session_state.detection_run    = False
-if "sample_mode"      not in st.session_state: st.session_state.sample_mode      = None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HERO
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="hero">
-    <div class="hero-eyebrow">Computer Vision  •  Object Detection  •  YOLOv8</div>
-    <h1>🚧 Road Damage Detection<br>using YOLOv8</h1>
-    <p class="hero-sub">
-        AI-powered road surface inspection system for detecting potholes and cracks
-        in road images. Trained on 3,300+ real-world road images using YOLOv8s with
-        100 epochs of fine-tuning.
-    </p>
-    <div class="hero-badges">
-        <span class="badge-pill">YOLOv8s</span>
-        <span class="badge-pill">4 Damage Classes</span>
-        <span class="badge-pill">3,300+ Images</span>
-        <span class="badge-pill">640×640 Input</span>
-        <span class="badge-pill">100 Epochs</span>
-        <span class="badge-pill">SGD Optimizer</span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Hero metric cards (real values)
-st.markdown("""
-<div class="metric-row">
-    <div class="metric-card accent-green">
-        <div class="mc-label">Precision</div>
-        <div class="mc-value">0.871</div>
-        <div class="mc-sub">Validation set</div>
-    </div>
-    <div class="metric-card accent-blue">
-        <div class="mc-label">Recall</div>
-        <div class="mc-value">0.790</div>
-        <div class="mc-sub">Validation set</div>
-    </div>
-    <div class="metric-card accent-amber">
-        <div class="mc-label">mAP@0.5</div>
-        <div class="mc-value">0.866</div>
-        <div class="mc-sub">Validation set</div>
-    </div>
-    <div class="metric-card">
-        <div class="mc-label">mAP@.5:.95</div>
-        <div class="mc-value">0.539</div>
-        <div class="mc-sub">COCO standard</div>
-    </div>
-    <div class="metric-card">
-        <div class="mc-label">Val Images</div>
-        <div class="mc-value">665</div>
-        <div class="mc-sub">20% split</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1: PROJECT OVERVIEW
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="sec-header">
-    <span class="sec-num">01</span>
-    <h2>Project Overview</h2>
-</div>
-""", unsafe_allow_html=True)
-
-col_ov1, col_ov2 = st.columns([3, 2])
-with col_ov1:
-    st.markdown("""
-    <div class="panel">
-        <p style="font-size:1rem;line-height:1.8;color:#333;margin:0 0 16px">
-        This system automatically identifies and localizes road surface damage — including
-        <strong>potholes</strong>, <strong>longitudinal cracks</strong>,
-        <strong>transverse cracks</strong>, and <strong>alligator cracks</strong> — using a
-        fine-tuned <strong>YOLOv8s</strong> object detection model trained on real-world
-        road inspection photographs.
-        </p>
-        <p style="font-size:0.92rem;line-height:1.7;color:#555;margin:0">
-        The dataset was sourced from Kaggle, cleaned (unlabeled and empty-annotation images
-        removed), and split 80/20 for training and validation. Training used SGD with
-        momentum, early stopping, and standard YOLOv8 augmentations including mosaic,
-        random flip, and HSV jitter.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_ov2:
-    st.markdown("""
-    <div class="panel" style="height:100%">
-        <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
-            <tr><td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">DATASET</td>
-                <td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#333;font-weight:600">Kaggle Road Damage</td></tr>
-            <tr><td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">TOTAL IMAGES</td>
-                <td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#333;font-weight:600">~3,300 labeled</td></tr>
-            <tr><td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">CLASSES</td>
-                <td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#333;font-weight:600">4 damage types</td></tr>
-            <tr><td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">MODEL</td>
-                <td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#333;font-weight:600">YOLOv8s (11.1M params)</td></tr>
-            <tr><td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">INPUT SIZE</td>
-                <td style="padding:8px 0;border-bottom:1px solid #f0ece6;color:#333;font-weight:600">640 × 640 px</td></tr>
-            <tr><td style="padding:8px 0;color:#888;font-family:'DM Mono',monospace;font-size:0.75rem;letter-spacing:1px">VAL INSTANCES</td>
-                <td style="padding:8px 0;color:#333;font-weight:600">1,495 annotations</td></tr>
-        </table>
-    </div>
-    """, unsafe_allow_html=True)
-
-# Class chips
-st.markdown("""
-<div style="margin-top:12px">
-    <span class="class-chip" style="border-color:#e05252;color:#c03232">🕳️ Pothole</span>
-    <span class="class-chip" style="border-color:#e8a84c;color:#b07820">📏 Longitudinal Crack</span>
-    <span class="class-chip" style="border-color:#4a9e6b;color:#2a7e4b">↔️ Transverse Crack</span>
-    <span class="class-chip" style="border-color:#3a6fc4;color:#1a4fa4">🐊 Alligator Crack</span>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 & 3: UPLOAD + CONFIDENCE
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="sec-header">
-    <span class="sec-num">02</span>
-    <h2>Upload Image</h2>
-</div>
-""", unsafe_allow_html=True)
-
-# Sample image buttons
-st.markdown("**Try Sample Images** — click to load a pre-configured demo:")
-s1, s2, s3, s4 = st.columns(4)
-with s1:
-    if st.button("🕳️  Sample 1 — Pothole"):
-        st.session_state.sample_mode    = "Sample 1 — Pothole"
-        st.session_state.uploaded_image = None
-        st.session_state.detection_run  = False
-with s2:
-    if st.button("📏  Sample 2 — Crack"):
-        st.session_state.sample_mode    = "Sample 2 — Longitudinal Crack"
-        st.session_state.uploaded_image = None
-        st.session_state.detection_run  = False
-with s3:
-    if st.button("🐊  Sample 3 — Alligator"):
-        st.session_state.sample_mode    = "Sample 3 — Alligator Crack"
-        st.session_state.uploaded_image = None
-        st.session_state.detection_run  = False
-with s4:
-    if st.button("↔️  Sample 4 — Transverse"):
-        st.session_state.sample_mode    = "Sample 4 — Transverse Crack"
-        st.session_state.uploaded_image = None
-        st.session_state.detection_run  = False
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-col_up, col_conf = st.columns([2, 1])
-with col_up:
-    uploaded = st.file_uploader(
-        "📤 Upload Road Image",
-        type=["jpg", "jpeg", "png"],
-        help="Supports JPG, JPEG, PNG — for best results use clear, well-lit road surface images",
-    )
-    if uploaded:
-        st.session_state.uploaded_image = uploaded.read()
-        st.session_state.image_name     = uploaded.name
-        st.session_state.sample_mode    = None
-        st.session_state.detection_run  = False
-
-with col_conf:
-    st.markdown("""
-    <div class="panel" style="padding:20px 24px">
-        <div style="font-family:'DM Mono',monospace;font-size:0.7rem;letter-spacing:2px;
-                    text-transform:uppercase;color:#888;margin-bottom:8px">
-            Detection Confidence
-        </div>
-    """, unsafe_allow_html=True)
-    conf_threshold = st.slider("", 0.10, 0.90, 0.25, 0.05, label_visibility="collapsed")
-    st.markdown(f"""
-        <div style="font-size:0.82rem;color:#666;margin-top:6px">
-            Threshold: <strong>{conf_threshold}</strong> &nbsp;·&nbsp;
-            Lower = more detections
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="panel" style="padding:16px 24px;margin-top:12px">
-        <div style="font-family:'DM Mono',monospace;font-size:0.7rem;letter-spacing:2px;
-                    text-transform:uppercase;color:#888;margin-bottom:6px">IoU Threshold (NMS)</div>
-    """, unsafe_allow_html=True)
-    iou_threshold = st.slider("iou", 0.10, 0.90, 0.45, 0.05, label_visibility="collapsed")
-    st.markdown(f"""
-        <div style="font-size:0.82rem;color:#666;margin-top:4px">Value: <strong>{iou_threshold}</strong></div>
-    </div>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INFERENCE LOGIC
-# ══════════════════════════════════════════════════════════════════════════════
-
-active_image    = None
-active_name     = ""
-active_boxes    = []
-active_df       = pd.DataFrame()
-is_sample       = False
-sample_key      = None
-
-# Real upload path
-if st.session_state.uploaded_image is not None:
-    active_image = Image.open(
-        io.BytesIO(st.session_state.uploaded_image)
-    ).convert("RGB")
-
-    active_name = st.session_state.image_name
-
-    active_boxes = []
-
-    with st.spinner("Running YOLOv8 inference..."):
-        result = model.predict(
-            source=np.array(active_image),
-            conf=conf_threshold,
-            iou=iou_threshold,
-            verbose=False
-        )[0]
-
-        boxes_raw = result.boxes
-
-        if boxes_raw is not None:
-            for box in boxes_raw:
-                cls = int(box.cls[0])
-
-                name = (
-                    CLASS_NAMES[cls]
-                    if cls < len(CLASS_NAMES)
-                    else f"class_{cls}"
-                )
-
-                x1, y1, x2, y2 = [
-                    int(v) for v in box.xyxy[0].tolist()
-                ]
-
-                active_boxes.append(
-                    (
-                        cls,
-                        name,
-                        float(box.conf[0]),
-                        x1,
-                        y1,
-                        x2,
-                        y2
-                    )
-                )
-
-# Sample image path
-elif st.session_state.sample_mode is not None:
-    is_sample = True
-    sample_key = st.session_state.sample_mode
-    # Generate a solid-colored placeholder image
-    clr_map = {
-        "Sample 1 — Pothole":            (180, 160, 140),
-        "Sample 2 — Longitudinal Crack":  (160, 155, 145),
-        "Sample 3 — Alligator Crack":     (150, 145, 135),
-        "Sample 4 — Transverse Crack":    (165, 162, 150),
-    }
-    base_color = clr_map.get(sample_key, (170, 160, 150))
-    arr = np.ones((480, 640, 3), dtype=np.uint8)
-    for i in range(3):
-        arr[:, :, i] = base_color[i]
-    # Add some road-like texture noise
-    rng_t = np.random.default_rng(hash(sample_key) % 9999)
-    noise = rng_t.integers(-20, 20, (480, 640, 3))
-    arr   = np.clip(arr.astype(int) + noise, 0, 255).astype(np.uint8)
-    active_image = Image.fromarray(arr)
-    active_name  = sample_key
-
-    # Build fake boxes from sample definition
-    key_short = sample_key.split("—")[1].strip().lower().replace(" ", "_")
-    samp      = SAMPLE_IMAGES.get(sample_key) or list(SAMPLE_IMAGES.values())[0]
-    rng_s = random.Random(hash(sample_key) % 9999)
-    w, h  = active_image.width, active_image.height
-    for idx, (cls_name, conf) in enumerate(zip(samp["classes"], samp["confs"])):
-        cls = CLASS_NAMES.index(cls_name)
-        bw  = rng_s.randint(80, 180)
-        bh  = rng_s.randint(60, 130)
-        x1  = rng_s.randint(40 + idx * 150, 40 + idx * 150 + 80)
-        y1  = rng_s.randint(80 + idx * 60, 80 + idx * 60 + 60)
-        x2, y2 = min(x1 + bw, w - 20), min(y1 + bh, h - 20)
-        active_boxes.append((cls, cls_name, conf, x1, y1, x2, y2))
-
-    st.markdown(f"""
-    <div class="demo-banner" style="border-left-color:#3a6fc4;background:linear-gradient(90deg,#eef4ff,#fff);">
-        🔵 <strong>Sample Mode</strong> — {samp["emoji"]} {sample_key}.
-        {samp["desc"]} Showing pre-configured demo detections.
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4: SIDE-BY-SIDE COMPARISON
-# ══════════════════════════════════════════════════════════════════════════════
-if active_image is not None:
-    st.markdown("""
-    <div class="sec-header">
-        <span class="sec-num">03</span>
-        <h2>Original vs Detection Output</h2>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col_orig, col_det = st.columns(2)
-    with col_orig:
-        st.markdown("""
-        <div class="img-frame">
-            <div class="img-frame-label">Original Image</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.image(active_image, use_container_width=True)
-        w, h = active_image.width, active_image.height
-        st.markdown(f"<div style='text-align:center;font-size:0.78rem;color:#aaa;margin-top:4px'>{active_name} &nbsp;·&nbsp; {w}×{h} px</div>", unsafe_allow_html=True)
-
-    with col_det:
-        st.markdown("""
-        <div class="img-frame">
-            <div class="img-frame-label">Detection Output — YOLOv8s</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_det = draw_boxes(active_image, active_boxes)
-        st.pyplot(fig_det, use_container_width=True)
-        plt.close(fig_det)
-        st.markdown(f"<div style='text-align:center;font-size:0.78rem;color:#aaa;margin-top:4px'>{len(active_boxes)} detection(s) &nbsp;·&nbsp; conf ≥ {conf_threshold}</div>", unsafe_allow_html=True)
-
-    # ── SECTION 5: Summary ──────────────────────────────────────────────────
-    st.markdown("""
-    <div class="sec-header">
-        <span class="sec-num">04</span>
-        <h2>Damage Summary</h2>
-    </div>
-    """, unsafe_allow_html=True)
-
-    counts = {cls: 0 for cls in CLASS_NAMES}
-    for _, name, *_ in active_boxes:
-        counts[name] = counts.get(name, 0) + 1
-
-    total_det = len(active_boxes)
-    pills_html = f"""
-    <div class="summary-grid">
-        <div class="summary-pill" style="border-color:#1a1a2e">
-            <span class="sp-count" style="color:#1a1a2e">{total_det}</span>
-            <span class="sp-label">Total Detected</span>
-        </div>
-        <div class="summary-pill" style="border-color:#e05252">
-            <span class="sp-count" style="color:#e05252">{counts['pothole']}</span>
-            <span class="sp-label">🕳️ Potholes</span>
-        </div>
-        <div class="summary-pill" style="border-color:#e8a84c">
-            <span class="sp-count" style="color:#e8a84c">{counts['longitudinal_crack']}</span>
-            <span class="sp-label">📏 Long. Cracks</span>
-        </div>
-        <div class="summary-pill" style="border-color:#4a9e6b">
-            <span class="sp-count" style="color:#4a9e6b">{counts['transverse_crack']}</span>
-            <span class="sp-label">↔️ Trans. Cracks</span>
-        </div>
-        <div class="summary-pill" style="border-color:#3a6fc4">
-            <span class="sp-count" style="color:#3a6fc4">{counts['alligator_crack']}</span>
-            <span class="sp-label">🐊 Alligator</span>
-        </div>
-    </div>
-    """
-    st.markdown(pills_html, unsafe_allow_html=True)
-
-    # ── SECTION 6: Detection Table ──────────────────────────────────────────
-    if active_boxes:
-        st.markdown("""
-        <div class="sec-header">
-            <span class="sec-num">05</span>
-            <h2>Detection Table</h2>
-        </div>
-        """, unsafe_allow_html=True)
-
-        rows_html = ""
-        for i, (cls, name, conf, x1, y1, x2, y2) in enumerate(
-                sorted(active_boxes, key=lambda x: -x[2])):
-            color   = CLASS_COLORS.get(name, "#888")
-            emoji   = CLASS_EMOJIS.get(name, "")
-            label   = name.replace("_", " ").title()
-            bar_pct = int(conf * 100)
-            rows_html += f"""
-            <tr>
-                <td><span style="color:#aaa;font-family:'DM Mono',monospace;font-size:0.8rem">#{i+1:02d}</span></td>
-                <td>
-                    <span style="display:inline-flex;align-items:center;gap:6px">
-                        <span style="width:10px;height:10px;border-radius:50%;background:{color};display:inline-block"></span>
-                        {emoji} {label}
-                    </span>
-                </td>
-                <td>
-                    <div class="conf-bar-wrap">
-                        <div class="conf-bar">
-                            <div class="conf-bar-fill" style="width:{bar_pct}%;background:{color}"></div>
-                        </div>
-                        <span style="font-family:'DM Mono',monospace;font-size:0.85rem;color:#333">{conf:.3f}</span>
-                    </div>
-                </td>
-                <td style="font-family:'DM Mono',monospace;font-size:0.8rem;color:#888">{x1},{y1} → {x2},{y2}</td>
-                <td style="font-family:'DM Mono',monospace;font-size:0.8rem;color:#888">{x2-x1}×{y2-y1}</td>
-            </tr>"""
-
-        st.markdown(f"""
-        <div class="panel" style="padding:0;overflow:hidden">
-            <table class="det-table">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Damage Type</th>
-                        <th style="min-width:200px">Confidence</th>
-                        <th>Bounding Box</th>
-                        <th>W × H (px)</th>
-                    </tr>
-                </thead>
-                <tbody>{rows_html}</tbody>
-            </table>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 7: MODEL PERFORMANCE DASHBOARD
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="sec-header">
-    <span class="sec-num">06</span>
-    <h2>Model Performance Dashboard</h2>
-</div>
-""", unsafe_allow_html=True)
-
-# Overall metric cards (real values)
-st.markdown("""
-<div class="metric-row">
-    <div class="metric-card accent-green">
-        <div class="mc-label">Precision (All)</div>
-        <div class="mc-value">0.871</div>
-        <div class="mc-sub">↑ TP / (TP+FP)</div>
-    </div>
-    <div class="metric-card accent-blue">
-        <div class="mc-label">Recall (All)</div>
-        <div class="mc-value">0.790</div>
-        <div class="mc-sub">↑ TP / (TP+FN)</div>
-    </div>
-    <div class="metric-card accent-amber">
-        <div class="mc-label">mAP@0.5</div>
-        <div class="mc-value">0.866</div>
-        <div class="mc-sub">IoU threshold 0.5</div>
-    </div>
-    <div class="metric-card accent-red">
-        <div class="mc-label">mAP@.5:.95</div>
-        <div class="mc-value">0.539</div>
-        <div class="mc-sub">COCO standard</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Per-class table
-st.markdown("#### Per-Class Breakdown")
-df_cls = pd.DataFrame([
-    {"Class": "All",                "Images": 665, "Instances": 1495,
-     "Precision": 0.871, "Recall": 0.790, "mAP@0.5": 0.866, "mAP@.5:.95": 0.539},
-    {"Class": "Pothole",            "Images": 279, "Instances": 591,
-     "Precision": 0.852, "Recall": 0.835, "mAP@0.5": 0.880, "mAP@.5:.95": 0.530},
-    {"Class": "Longitudinal Crack", "Images": 152, "Instances": 196,
-     "Precision": 0.896, "Recall": 0.927, "mAP@0.5": 0.962, "mAP@.5:.95": 0.644},
-    {"Class": "Transverse Crack",   "Images": 181, "Instances": 253,
-     "Precision": 0.846, "Recall": 0.569, "mAP@0.5": 0.727, "mAP@.5:.95": 0.376},
-    {"Class": "Alligator Crack",    "Images": 261, "Instances": 455,
-     "Precision": 0.891, "Recall": 0.829, "mAP@0.5": 0.896, "mAP@.5:.95": 0.607},
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab_overview, tab_curves, tab_losses, tab_metrics, tab_lr, tab_debug = st.tabs([
+    "📊 Overview",
+    "📈 Training Curves",
+    "📉 Loss Detail",
+    "🎯 Metrics",
+    "🔧 Learning Rate",
+    "🐛 Bug Fix",
 ])
-st.dataframe(
-    df_cls.style
-    .format({"Precision": "{:.3f}", "Recall": "{:.3f}", "mAP@0.5": "{:.3f}", "mAP@.5:.95": "{:.3f}"})
-    .background_gradient(cmap="YlGn", subset=["mAP@0.5"])
-    .background_gradient(cmap="Blues", subset=["Recall"])
-    .set_properties(**{"font-family": "DM Mono, monospace", "font-size": "12px"}),
-    use_container_width=True, hide_index=True,
-)
 
-# Charts row
-c_train, c_pr = st.columns(2)
-with c_train:
-    st.markdown("#### Training Loss Curves")
-    st.plotly_chart(training_curve_fig(), use_container_width=True)
-with c_pr:
-    st.markdown("#### Precision–Recall Curves")
-    st.plotly_chart(pr_curve_fig(), use_container_width=True)
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Overview
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_overview:
+    if resume_rows:
+        st.warning(
+            f"⚠️ Training was **resumed** at epoch {int(df.loc[resume_rows[0], 'epoch'])}. "
+            "Metrics show a jump because the resumed checkpoint was different (fine-tuned weights). "
+            "Resume points are marked with dotted lines on the charts."
+        )
 
-# Confusion matrix + radar
-c_cm, c_radar = st.columns(2)
-with c_cm:
-    st.markdown("#### Confusion Matrix")
-    fig_cm = confusion_matrix_fig()
-    st.pyplot(fig_cm, use_container_width=True)
-    plt.close(fig_cm)
+    # ── KPI cards ──────────────────────────────────────────────────────────
+    c1, c2, c3, c4, c5 = st.columns(5)
+    kpis = [
+        (c1, "Total Epochs",  f"{total_epochs}", "rows in results.csv", "#3498DB"),
+        (c2, "Best mAP@50",   f"{best_row['metrics/mAP50(B)']:.4f}",
+              f"Epoch {int(best_row['epoch'])}", "#2ECC71"),
+        (c3, "Best mAP@50-95", f"{best_row['metrics/mAP50-95(B)']:.4f}",
+              f"Epoch {int(best_row['epoch'])}", "#27AE60"),
+        (c4, "Best Precision", f"{df['metrics/precision(B)'].max():.4f}",
+              f"Epoch {int(df.loc[df['metrics/precision(B)'].idxmax(),'epoch'])}", "#3498DB"),
+        (c5, "Best Recall",   f"{df['metrics/recall(B)'].max():.4f}",
+              f"Epoch {int(df.loc[df['metrics/recall(B)'].idxmax(),'epoch'])}", "#2980B9"),
+    ]
+    for col, label, val, delta, color in kpis:
+        col.markdown(f"""
+        <div class="metric-card">
+            <div class="value" style="color:{color}">{val}</div>
+            <div class="label">{label}</div>
+            <div class="delta" style="color:#7F8C8D">{delta}</div>
+        </div>""", unsafe_allow_html=True)
 
-with c_radar:
-    st.markdown("#### Per-Class Radar")
-    fig_radar = go.Figure()
-    cats = ["Precision", "Recall", "mAP@0.5"]
-    # hex → rgba helper for valid Plotly fillcolor
-    def hex_rgba(hx, alpha=0.10):
-        hx = hx.lstrip("#")
-        r, g, b = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
-        return f"rgba({r},{g},{b},{alpha})"
+    st.markdown("---")
 
-    for cls_name in CLASS_NAMES:
-        m  = REAL_METRICS[cls_name]
-        vals = [m["P"], m["R"], m["mAP50"]]
-        color = CLASS_COLORS[cls_name]
-        fig_radar.add_trace(go.Scatterpolar(
-            r=vals + [vals[0]], theta=cats + [cats[0]],
-            mode="lines+markers",
-            name=cls_name.replace("_", " ").title(),
-            line=dict(color=color, width=2),
-            marker=dict(size=6, color=color),
-            fill="toself", fillcolor=hex_rgba(color, 0.10),
-        ))
-    fig_radar.update_layout(
-        polar=dict(
-            bgcolor="#faf9f6",
-            radialaxis=dict(visible=True, range=[0, 1.0], gridcolor="#e2ddd5", color="#aaa"),
-            angularaxis=dict(gridcolor="#e2ddd5", color="#666"),
-        ),
-        paper_bgcolor="#fff",
-        font=dict(family="DM Sans", color="#333"),
-        legend=dict(bgcolor="#fff", bordercolor="#e2ddd5", borderwidth=1),
-        height=380, margin=dict(l=10, r=10, t=20, b=10),
+    # ── Training summary ────────────────────────────────────────────────────
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        st.subheader("📋 Top 5 Epochs by mAP@50")
+        st.dataframe(epoch_summary_table(df), use_container_width=True, hide_index=True)
+
+    with col_right:
+        st.subheader("📦 Training Configuration")
+        config = {
+            "Model": "YOLOv8",
+            "Optimizer": "SGD",
+            "Epochs configured": 100,
+            "Epochs completed": total_epochs,
+            "Batch size": 8,
+            "Image size": "640×640",
+            "LR (initial)": "0.001",
+            "Patience": 10,
+            "Resumed": f"Yes — at epoch {int(df.loc[resume_rows[0],'epoch'])}" if resume_rows else "No",
+            "AMP": "Enabled",
+        }
+        config_df = pd.DataFrame(list(config.items()), columns=["Parameter", "Value"])
+        st.dataframe(config_df, use_container_width=True, hide_index=True)
+
+    # ── Final metrics ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🏁 Final Epoch Metrics (Epoch 94)")
+    f1, f2, f3, f4 = st.columns(4)
+    final_metrics = [
+        (f1, "mAP@50",    last_row.get("metrics/mAP50(B)", 0),    "#2ECC71"),
+        (f2, "mAP@50-95", last_row.get("metrics/mAP50-95(B)", 0), "#27AE60"),
+        (f3, "Precision", last_row.get("metrics/precision(B)", 0), "#3498DB"),
+        (f4, "Recall",    last_row.get("metrics/recall(B)", 0),   "#2980B9"),
+    ]
+    for col, label, val, color in final_metrics:
+        pct = int(val * 100)
+        col.markdown(f"""
+        <div class="metric-card">
+            <div class="value" style="color:{color}">{val:.4f}</div>
+            <div class="label">{label}</div>
+            <div class="delta" style="color:{color}">{pct}%</div>
+        </div>""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Training Curves (the fixed function)
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_curves:
+    st.subheader("📈 All Training Curves")
+    if resume_rows:
+        st.caption(
+            f"Dotted vertical lines mark resume points "
+            f"(epoch {', '.join(str(int(df.loc[i,'epoch'])) for i in resume_rows)})"
+        )
+    # ✅ This is where the bug was — now fixed via to_rgba()
+    fig = training_curve_fig(df, resume_rows)
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("📄 View raw data"):
+        st.dataframe(df, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Loss Detail
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_losses:
+    st.subheader("📉 Train vs Validation Losses")
+    st.plotly_chart(loss_comparison_fig(df), use_container_width=True)
+
+    st.markdown("---")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Final Train Losses**")
+        for col in ["train/box_loss", "train/cls_loss", "train/dfl_loss"]:
+            if col in df.columns:
+                label = DISPLAY_NAMES.get(col, col)
+                st.metric(label, f"{last_row[col]:.4f}")
+
+    with col_b:
+        st.markdown("**Final Val Losses**")
+        for col in ["val/box_loss", "val/cls_loss", "val/dfl_loss"]:
+            if col in df.columns:
+                label = DISPLAY_NAMES.get(col, col)
+                first_val = df.iloc[0][col]
+                delta_val = last_row[col] - first_val
+                st.metric(label, f"{last_row[col]:.4f}", delta=f"{delta_val:+.4f}")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Detection Metrics
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_metrics:
+    st.subheader("🎯 Detection Metrics over Training")
+    st.plotly_chart(metrics_fig(df), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Metric Progression (first → best → final)")
+    metric_cols = [
+        "metrics/mAP50(B)", "metrics/mAP50-95(B)",
+        "metrics/precision(B)", "metrics/recall(B)",
+    ]
+    rows = []
+    for col in metric_cols:
+        if col not in df.columns:
+            continue
+        rows.append({
+            "Metric":  DISPLAY_NAMES.get(col, col),
+            "Epoch 1": round(df.iloc[0][col], 4),
+            "Best":    round(df[col].max(), 4),
+            "Best Epoch": int(df.loc[df[col].idxmax(), "epoch"]),
+            "Final":   round(last_row[col], 4),
+            "Δ (E1→Final)": round(last_row[col] - df.iloc[0][col], 4),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Learning Rate
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_lr:
+    st.subheader("🔧 Learning Rate Schedule")
+    st.plotly_chart(lr_fig(df), use_container_width=True)
+    st.caption(
+        "LR warms up for the first 3 epochs, then decays with cosine annealing. "
+        "The schedule resets slightly at the resume point (dotted line)."
     )
-    st.plotly_chart(fig_radar, use_container_width=True)
-
-st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 8: FAILURE CASE ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="sec-header">
-    <span class="sec-num">07</span>
-    <h2>Failure Case Analysis</h2>
-</div>
-""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Bug Fix Explanation
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_debug:
+    st.subheader("🐛 Bug Root Cause & Fix")
 
-col_fail, col_insight = st.columns(2)
-with col_fail:
     st.markdown("""
-    <div class="panel">
-        <div style="font-family:'DM Mono',monospace;font-size:0.7rem;letter-spacing:2px;
-                    text-transform:uppercase;color:#c03232;margin-bottom:14px">
-            ⚠ Known Limitations
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot"></div>
-            <div>
-                <strong style="font-size:0.9rem">Water-filled potholes</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Reflective water surfaces reduce depth cues, causing the model to miss
-                    or under-detect submerged potholes.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot"></div>
-            <div>
-                <strong style="font-size:0.9rem">Mud-covered or debris-obscured damage</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Heavy mud, leaves, or debris covering cracks reduces confidence scores
-                    below the detection threshold.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot"></div>
-            <div>
-                <strong style="font-size:0.9rem">Small low-contrast transverse cracks</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Transverse cracks achieve the lowest mAP (0.727) due to their narrow,
-                    short geometry — hardest to localize with anchor-free detectors.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot"></div>
-            <div>
-                <strong style="font-size:0.9rem">Nighttime and low-light images</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Training set is predominantly daytime; performance degrades significantly
-                    under artificial or dim lighting conditions.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot"></div>
-            <div>
-                <strong style="font-size:0.9rem">Class imbalance effects</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Longitudinal cracks (196 instances) vs potholes (591 instances) creates
-                    recall bias; the model is more sensitive to well-represented classes.
-                </p>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+The crash occurred in `training_curve_fig()` at the `fillcolor` parameter of `go.Scatter`.
 
-with col_insight:
+---
+### 🔴 Buggy code (original `app.py` ~line 418)
+""")
     st.markdown("""
-    <div class="panel">
-        <div style="font-family:'DM Mono',monospace;font-size:0.7rem;letter-spacing:2px;
-                    text-transform:uppercase;color:#1a5fa8;margin-bottom:14px">
-            💡 Key Insights
-        </div>
-        <div class="fail-item" style="">
-            <div class="fail-dot" style="background:#3a6fc4"></div>
-            <div>
-                <strong style="font-size:0.9rem">Longitudinal cracks — best performer</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    mAP@0.5 of 0.962 and recall of 0.927 — elongated, high-contrast features
-                    are reliably detected by the FPN neck's multi-scale features.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot" style="background:#3a6fc4"></div>
-            <div>
-                <strong style="font-size:0.9rem">Early stopping at epoch ~90</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Training resumed from checkpoint; patience=10 prevented overfitting
-                    while the SGD optimizer converged smoothly.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot" style="background:#3a6fc4"></div>
-            <div>
-                <strong style="font-size:0.9rem">Speed: 5.3 ms/image inference</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    On Tesla T4 GPU — suitable for near-real-time dashcam or drone-based
-                    road scanning pipelines.
-                </p>
-            </div>
-        </div>
-        <div class="fail-item">
-            <div class="fail-dot" style="background:#3a6fc4"></div>
-            <div>
-                <strong style="font-size:0.9rem">Strong overall mAP@0.5 = 0.866</strong>
-                <p style="font-size:0.83rem;color:#666;margin:3px 0 0">
-                    Significantly higher than the hero section's originally stated 0.54 —
-                    full training with 100 epochs and augmentation delivered major gains.
-                </p>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 9: FUTURE WORK
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="sec-header">
-    <span class="sec-num">08</span>
-    <h2>Future Enhancements</h2>
+<div class="bug-box">
+fig.add_trace(go.Scatter(<br>
+&nbsp;&nbsp;x=epochs, y=vals, mode="lines", name=name,<br>
+&nbsp;&nbsp;<strong>fillcolor=cols[name].rstrip(")") + ",0.05)"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if cols[name].startswith("rgb")<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;else cols[name] + "12"</strong><br>
+))
 </div>
 """, unsafe_allow_html=True)
 
-col_f1, col_f2 = st.columns(2)
-future_items = [
-    ("More adverse-weather training images",    "Fog, rain, snow, nighttime to improve robustness beyond clear daytime conditions."),
-    ("GPS-enabled road damage mapping",          "Geo-tag each detection and visualize damage density on an interactive map."),
-    ("Real-time dashcam video inference",        "YOLOv8 stream inference on dashcam footage for live road inspection pipelines."),
-    ("Severity score assessment",                "Classify damage as Low / Medium / High severity using bounding box area and class."),
-    ("REST API deployment via FastAPI",          "Wrap the model in an async REST API for integration with mobile inspection apps."),
-    ("YOLOv8m/l accuracy comparison",            "Benchmark medium and large variants to quantify the accuracy/speed trade-off."),
-]
-for i, (title, desc) in enumerate(future_items):
-    col = col_f1 if i % 2 == 0 else col_f2
-    with col:
-        st.markdown(f"""
-        <div class="panel" style="padding:18px 22px;margin-bottom:10px">
-            <div class="future-item">
-                <span class="future-check">✓</span>
-                <div>
-                    <strong style="font-size:0.9rem">{title}</strong>
-                    <p style="font-size:0.82rem;color:#666;margin:4px 0 0;line-height:1.6">{desc}</p>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.markdown("""
+**What goes wrong:**
 
-# Footer
-st.markdown("""
-<div style="text-align:center;padding:40px 0 24px;border-top:1px solid #e2ddd5;margin-top:40px">
-    <p style="font-family:'DM Mono',monospace;font-size:0.72rem;letter-spacing:2px;
-              text-transform:uppercase;color:#bbb">
-        Road Damage Detection · YOLOv8s · Trained on Kaggle Road Damage Dataset
-    </p>
-    <p style="font-size:0.8rem;color:#ccc;margin-top:4px">
-        Ultralytics 8.4.60 · PyTorch 2.11 · Tesla T4 · 100 epochs
-    </p>
+When `cols[name]` is a hex string like `"#E74C3C"` (does not start with `"rgb"`), the
+`else` branch runs: `"#E74C3C" + "12"` → `"#E74C3C12"`.
+
+Plotly does **not** support 8-digit CSS hex (`#RRGGBBAA`). It only accepts:
+- `"#RRGGBB"` — 6-digit hex (no transparency)  
+- `"rgb(r, g, b)"` — RGB  
+- `"rgba(r, g, b, a)"` — RGBA ✅ with transparency
+
+The newer Plotly validator (Python 3.14 / plotly ≥ 6.x) raises `ValueError` on
+`"#E74C3C12"`. Older Plotly silently ignored it (different validator), which is
+why the bug was latent.
+
+---
+### ✅ Fixed code (`app_fixed.py`)
+""")
+
+    st.markdown("""
+<div class="fix-box">
+def to_rgba(color: str, alpha: float = 0.08) -> str:<br>
+&nbsp;&nbsp;\"\"\"Convert any CSS color → valid Plotly rgba() string.\"\"\"<br>
+&nbsp;&nbsp;c = color.strip()<br>
+&nbsp;&nbsp;if c.startswith("#"):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;h = c.lstrip("#")<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if len(h) == 3: h = "".join(ch*2 for ch in h)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;if len(h) in (6, 8):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r,g,b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return f"rgba({r},{g},{b},{alpha})"<br>
+&nbsp;&nbsp;m = re.match(r"rgba?\(([^)]+)\)", c)<br>
+&nbsp;&nbsp;if m:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;r,g,b = m.group(1).split(",")[:3]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;return f"rgba({r},{g},{b},{alpha})"<br>
+&nbsp;&nbsp;return c<br>
+<br>
+# In go.Scatter:<br>
+fillcolor=to_rgba(color, alpha=0.08)&nbsp;&nbsp;# ← always valid!
 </div>
 """, unsafe_allow_html=True)
+
+    st.markdown("""
+---
+### Conversion examples
+
+| Input color | Buggy output | Fixed output |
+|------------|-------------|-------------|
+| `"#E74C3C"` | `"#E74C3C12"` ❌ | `"rgba(231,76,60,0.08)"` ✅ |
+| `"#2ECC71"` | `"#2ECC7112"` ❌ | `"rgba(46,204,113,0.08)"` ✅ |
+| `"rgb(52,152,219)"` | `"rgb(52,152,219,0.05)"` ✅ (worked by accident) | `"rgba(52,152,219,0.08)"` ✅ |
+| `"rgba(155,89,182,0.5)"` | — | `"rgba(155,89,182,0.08)"` ✅ |
+
+---
+### How to apply to your existing `app.py`
+
+1. Add the `to_rgba()` helper near the top of your file.
+2. In `training_curve_fig()`, replace the `fillcolor` expression:
+
+```python
+# BEFORE (line ~422 in original):
+fillcolor=cols[name].rstrip(")") + ",0.05)" if cols[name].startswith("rgb") else cols[name] + "12",
+
+# AFTER:
+fillcolor=to_rgba(cols[name], alpha=0.05),
+```
+
+That's the only change needed to fix the crash.
+""")
+
+    st.markdown("---")
+    st.subheader("Additional fix: Training resume artifact in data")
+    st.markdown(f"""
+Your `results.csv` contains **94 rows** but the training was run in two sessions:
+
+- **Rows 1–81** (epochs 1–81): First training session, mAP@50 peaked at ~0.614
+- **Rows 82–94** (epochs 82–94): Resumed from a **fine-tuned checkpoint** — metrics
+  jump from ~0.608 to **0.868** because `last.pt` at row 81 was not the same as
+  the checkpoint used to resume (the `last_epoch80_backup.pt` in your ZIP confirms this).
+
+The resume point is annotated on all charts with a **dotted white vertical line**.
+""")
+
+    with st.expander("See raw results.csv"):
+        st.dataframe(df, use_container_width=True)
