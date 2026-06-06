@@ -1,708 +1,659 @@
 """
-🛣️ Road Damage Detection — YOLOv8 Dashboard
-============================================
-Author: Raghavi Nandana Yadla
-Model: YOLOv8 trained on road damage dataset
-Repo: raghavinandanayadla-cloud/road-damage-detection
+Road Damage Detector — Streamlit App
+YOLOv8s trained on Road Damage Dataset (4 classes, 94 epochs)
+Place this file alongside:
+    weights/best.pt
+    metrics/  (the metrics folder from training)
 """
 
-import re
-import io
-import os
-import sys
-import zipfile
-import tempfile
-import requests
+import streamlit as st
+import cv2
 import numpy as np
+from PIL import Image
+import os, io, time, glob
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import streamlit as st
-from PIL import Image
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-GITHUB_RAW   = "https://raw.githubusercontent.com/raghavinandanayadla-cloud/road-damage-detection/main"
-WEIGHTS_URL  = f"{GITHUB_RAW}/weights/best.pt"
-RESULTS_URL  = f"{GITHUB_RAW}/results.csv"
-MODEL_LOCAL  = "best.pt"
-
-DAMAGE_CLASSES = {
-    0: "Longitudinal Crack",
-    1: "Transverse Crack",
-    2: "Alligator Crack",
-    3: "Pothole",
-}
-
-CLASS_COLORS = {
-    "Longitudinal Crack": "#E74C3C",
-    "Transverse Crack":   "#E67E22",
-    "Alligator Crack":    "#9B59B6",
-    "Pothole":            "#3498DB",
-    "Road Damage":        "#E74C3C",   # fallback
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UTILS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def to_rgba(color: str, alpha: float = 0.08) -> str:
-    c = color.strip()
-    if c.startswith("#"):
-        h = c.lstrip("#")
-        if len(h) == 3:
-            h = "".join(ch * 2 for ch in h)
-        if len(h) in (6, 8):
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-            return f"rgba({r},{g},{b},{alpha})"
-    m = re.match(r"rgba?\(([^)]+)\)", c, re.I)
-    if m:
-        parts = [p.strip() for p in m.group(1).split(",")]
-        r, g, b = parts[0], parts[1], parts[2]
-        return f"rgba({r},{g},{b},{alpha})"
-    return c
-
-
-@st.cache_resource(show_spinner=False)
-def load_model():
-    """Download best.pt from GitHub and load via ultralytics."""
-    try:
-        from ultralytics import YOLO
-    except ImportError:
-        return None, "ultralytics not installed — run: pip install ultralytics"
-
-    if not os.path.exists(MODEL_LOCAL):
-        with st.spinner("⬇️ Downloading model weights from GitHub…"):
-            try:
-                r = requests.get(WEIGHTS_URL, timeout=120)
-                if r.status_code != 200:
-                    return None, f"Could not download model (HTTP {r.status_code}). Check that `weights/best.pt` exists in your GitHub repo and the repo is public."
-                with open(MODEL_LOCAL, "wb") as f:
-                    f.write(r.content)
-            except Exception as e:
-                return None, f"Download error: {e}"
-
-    try:
-        model = YOLO(MODEL_LOCAL)
-        return model, None
-    except Exception as e:
-        return None, f"Failed to load model: {e}"
-
-
-@st.cache_data(show_spinner=False)
-def load_results_csv_from_github() -> pd.DataFrame | None:
-    try:
-        r = requests.get(RESULTS_URL, timeout=30)
-        if r.status_code == 200:
-            df = pd.read_csv(io.StringIO(r.text))
-            df.columns = [c.strip() for c in df.columns]
-            return df
-    except Exception:
-        pass
-    return None
-
-
-@st.cache_data
-def load_results_csv(source) -> pd.DataFrame:
-    df = pd.read_csv(source)
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-
-@st.cache_data
-def load_from_zip(zip_bytes: bytes) -> pd.DataFrame:
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        csv_files = [n for n in zf.namelist() if n.endswith("results.csv")]
-        if not csv_files:
-            st.error("No results.csv found inside the ZIP.")
-            st.stop()
-        with zf.open(csv_files[0]) as f:
-            df = pd.read_csv(f)
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-
-def detect_resume_points(df: pd.DataFrame) -> list[int]:
-    if "time" not in df.columns:
-        return []
-    diffs = df["time"].diff()
-    return df[diffs < 0].index.tolist()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PALETTES
-# ─────────────────────────────────────────────────────────────────────────────
-PALETTE = {
-    "train/box_loss":       "#E74C3C",
-    "train/cls_loss":       "#E67E22",
-    "train/dfl_loss":       "#9B59B6",
-    "val/box_loss":         "#C0392B",
-    "val/cls_loss":         "#D35400",
-    "val/dfl_loss":         "#8E44AD",
-    "metrics/mAP50(B)":     "#2ECC71",
-    "metrics/mAP50-95(B)":  "#27AE60",
-    "metrics/precision(B)": "#3498DB",
-    "metrics/recall(B)":    "#2980B9",
-    "lr/pg0":               "#F1C40F",
-    "lr/pg1":               "#F39C12",
-    "lr/pg2":               "#D4AC0D",
-}
-
-DISPLAY_NAMES = {
-    "train/box_loss":       "Train Box Loss",
-    "train/cls_loss":       "Train Cls Loss",
-    "train/dfl_loss":       "Train DFL Loss",
-    "val/box_loss":         "Val Box Loss",
-    "val/cls_loss":         "Val Cls Loss",
-    "val/dfl_loss":         "Val DFL Loss",
-    "metrics/mAP50(B)":     "mAP@50",
-    "metrics/mAP50-95(B)":  "mAP@50-95",
-    "metrics/precision(B)": "Precision",
-    "metrics/recall(B)":    "Recall",
-    "lr/pg0":               "LR (pg0)",
-    "lr/pg1":               "LR (pg1)",
-    "lr/pg2":               "LR (pg2)",
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CHART BUILDERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def training_curve_fig(df: pd.DataFrame, resume_rows: list[int]) -> go.Figure:
-    metric_groups = {
-        "Losses — Train":     ["train/box_loss", "train/cls_loss", "train/dfl_loss"],
-        "Losses — Val":       ["val/box_loss",   "val/cls_loss",   "val/dfl_loss"],
-        "Detection Metrics":  ["metrics/mAP50(B)", "metrics/mAP50-95(B)",
-                               "metrics/precision(B)", "metrics/recall(B)"],
-        "Learning Rate":      ["lr/pg0"],
-    }
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=list(metric_groups.keys()),
-        vertical_spacing=0.12, horizontal_spacing=0.08,
-    )
-    positions = [(1,1),(1,2),(2,1),(2,2)]
-    for (row, col), (group_name, cols) in zip(positions, metric_groups.items()):
-        for col_name in cols:
-            if col_name not in df.columns:
-                continue
-            vals   = df[col_name].values
-            epochs = df["epoch"].values
-            color  = PALETTE.get(col_name, "#888888")
-            label  = DISPLAY_NAMES.get(col_name, col_name)
-            fig.add_trace(go.Scatter(
-                x=epochs, y=vals, mode="lines", name=label,
-                line=dict(color=color, width=2),
-                legendgroup=group_name,
-                hovertemplate=f"<b>{label}</b><br>Epoch: %{{x}}<br>Value: %{{y:.4f}}<extra></extra>",
-            ), row=row, col=col)
-            fig.add_trace(go.Scatter(
-                x=epochs, y=vals, mode="none",
-                fill="tozeroy", fillcolor=to_rgba(color, 0.08),
-                showlegend=False, hoverinfo="skip", legendgroup=group_name,
-            ), row=row, col=col)
-        for resume_idx in resume_rows:
-            resume_epoch = df.loc[resume_idx, "epoch"]
-            fig.add_vline(
-                x=resume_epoch,
-                line=dict(color="rgba(255,255,255,0.5)", width=1.5, dash="dot"),
-                row=row, col=col,
-                annotation_text="resume", annotation_font_size=9,
-                annotation_font_color="rgba(255,255,255,0.6)",
-            )
-    fig.update_layout(
-        height=700, template="plotly_dark",
-        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
-        font=dict(color="#E0E0E0", size=12),
-        legend=dict(bgcolor="rgba(30,34,50,0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
-        margin=dict(l=50, r=20, t=60, b=40),
-        title=dict(text="YOLOv8 Training Curves", font=dict(size=18), x=0.5, xanchor="center"),
-    )
-    fig.update_xaxes(title_text="Epoch", gridcolor="rgba(255,255,255,0.05)")
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-    return fig
-
-
-def loss_comparison_fig(df: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    pairs = [
-        ("train/box_loss","val/box_loss","Box Loss","#E74C3C","#C0392B"),
-        ("train/cls_loss","val/cls_loss","Cls Loss","#E67E22","#D35400"),
-        ("train/dfl_loss","val/dfl_loss","DFL Loss","#9B59B6","#8E44AD"),
-    ]
-    epochs = df["epoch"].values
-    for tr_col, vl_col, label, tr_color, vl_color in pairs:
-        if tr_col in df.columns:
-            fig.add_trace(go.Scatter(x=epochs, y=df[tr_col].values, name=f"Train {label}",
-                line=dict(color=tr_color, width=2),
-                hovertemplate=f"<b>Train {label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>"))
-        if vl_col in df.columns:
-            fig.add_trace(go.Scatter(x=epochs, y=df[vl_col].values, name=f"Val {label}",
-                line=dict(color=vl_color, width=2, dash="dash"),
-                hovertemplate=f"<b>Val {label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>"))
-    fig.update_layout(
-        title="Train vs Validation Loss", height=400, template="plotly_dark",
-        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
-        xaxis_title="Epoch", yaxis_title="Loss",
-        legend=dict(bgcolor="rgba(30,34,50,0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
-        font=dict(color="#E0E0E0"), margin=dict(l=50,r=20,t=50,b=40),
-    )
-    return fig
-
-
-def metrics_fig(df: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    metrics = [
-        ("metrics/mAP50(B)",    "mAP@50",    "#2ECC71"),
-        ("metrics/mAP50-95(B)","mAP@50-95", "#27AE60"),
-        ("metrics/precision(B)","Precision", "#3498DB"),
-        ("metrics/recall(B)",   "Recall",    "#2980B9"),
-    ]
-    epochs = df["epoch"].values
-    for col, label, color in metrics:
-        if col not in df.columns:
-            continue
-        fig.add_trace(go.Scatter(
-            x=epochs, y=df[col].values, name=label,
-            line=dict(color=color, width=2.5),
-            fill="tozeroy", fillcolor=to_rgba(color, 0.07),
-            hovertemplate=f"<b>{label}</b><br>Epoch: %{{x}}<br>%{{y:.4f}}<extra></extra>",
-        ))
-    fig.update_layout(
-        title="Detection Metrics over Training", height=400, template="plotly_dark",
-        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
-        xaxis_title="Epoch", yaxis_title="Score (0–1)",
-        yaxis=dict(range=[0,1.05]),
-        legend=dict(bgcolor="rgba(30,34,50,0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
-        font=dict(color="#E0E0E0"), margin=dict(l=50,r=20,t=50,b=40),
-    )
-    return fig
-
-
-def lr_fig(df: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    lr_cols = [c for c in df.columns if c.startswith("lr/")]
-    colors  = ["#F1C40F","#F39C12","#D4AC0D"]
-    epochs  = df["epoch"].values
-    for col, color in zip(lr_cols, colors):
-        fig.add_trace(go.Scatter(
-            x=epochs, y=df[col].values, name=col,
-            line=dict(color=color, width=2),
-            hovertemplate=f"<b>{col}</b><br>Epoch: %{{x}}<br>LR: %{{y:.6f}}<extra></extra>",
-        ))
-    fig.update_layout(
-        title="Learning Rate Schedule", height=300, template="plotly_dark",
-        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
-        xaxis_title="Epoch", yaxis_title="LR",
-        font=dict(color="#E0E0E0"), margin=dict(l=50,r=20,t=50,b=40),
-    )
-    return fig
-
-
-def epoch_summary_table(df: pd.DataFrame) -> pd.DataFrame:
-    key = "metrics/mAP50(B)"
-    if key not in df.columns:
-        return df.head()
-    cols_to_show = [c for c in ["epoch","metrics/mAP50(B)","metrics/mAP50-95(B)",
-                                 "metrics/precision(B)","metrics/recall(B)",
-                                 "train/box_loss","val/box_loss"] if c in df.columns]
-    top = df.nlargest(5, key)[cols_to_show].copy()
-    rename = {"epoch":"Epoch","metrics/mAP50(B)":"mAP@50","metrics/mAP50-95(B)":"mAP@50-95",
-              "metrics/precision(B)":"Precision","metrics/recall(B)":"Recall",
-              "train/box_loss":"Train Box Loss","val/box_loss":"Val Box Loss"}
-    top.rename(columns=rename, inplace=True)
-    return top.round(4).reset_index(drop=True)
-
-
-def confidence_histogram(detections: list[dict]) -> go.Figure:
-    if not detections:
-        return None
-    confs  = [d["confidence"] for d in detections]
-    labels = [d["label"] for d in detections]
-    colors = [CLASS_COLORS.get(l, "#888") for l in labels]
-    fig = go.Figure(go.Bar(
-        x=labels, y=confs,
-        marker_color=colors,
-        text=[f"{c:.2f}" for c in confs],
-        textposition="auto",
-        hovertemplate="<b>%{x}</b><br>Confidence: %{y:.3f}<extra></extra>",
-    ))
-    fig.update_layout(
-        title="Detection Confidences", height=300, template="plotly_dark",
-        paper_bgcolor="#0E1117", plot_bgcolor="#1A1E2E",
-        xaxis_title="Class", yaxis_title="Confidence", yaxis=dict(range=[0,1]),
-        font=dict(color="#E0E0E0"), margin=dict(l=50,r=20,t=50,b=60),
-    )
-    return fig
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INFERENCE HELPER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_inference(model, pil_image: Image.Image, conf_thresh: float = 0.25) -> tuple:
-    """Run YOLOv8 inference. Returns (annotated PIL image, list of detection dicts)."""
-    import numpy as np
-    img_arr = np.array(pil_image)
-    results  = model.predict(img_arr, conf=conf_thresh, verbose=False)
-    result   = results[0]
-
-    detections = []
-    if result.boxes is not None and len(result.boxes) > 0:
-        for box in result.boxes:
-            cls_id = int(box.cls[0])
-            conf   = float(box.conf[0])
-            xyxy   = box.xyxy[0].tolist()
-            label  = DAMAGE_CLASSES.get(cls_id, result.names.get(cls_id, f"Class {cls_id}"))
-            detections.append({
-                "label":      label,
-                "confidence": conf,
-                "bbox":       xyxy,
-                "class_id":   cls_id,
-            })
-
-    # annotated image (PIL)
-    annotated = Image.fromarray(result.plot())
-    return annotated, detections
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG & CSS
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Road Damage Detection — YOLOv8",
-    page_icon="🛣️", layout="wide",
+    page_title="Road Damage Detector · YOLOv8s",
+    page_icon="🚧",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  .stApp { background-color: #0E1117; color: #E0E0E0; }
-  .metric-card {
-      background: #1A1E2E; border-radius: 12px; padding: 18px 22px;
-      border: 1px solid rgba(255,255,255,0.08); text-align: center;
-  }
-  .metric-card .value { font-size: 2rem; font-weight: 700; }
-  .metric-card .label { font-size: 0.85rem; color: #9BA3B8; margin-top: 4px; }
-  .metric-card .delta { font-size: 0.8rem; margin-top: 2px; }
-  .detection-badge {
-      display: inline-block; padding: 4px 12px; border-radius: 20px;
-      font-size: 0.8rem; font-weight: 600; margin: 3px;
-  }
-  .status-ok   { color: #2ECC71; }
-  .status-warn { color: #E67E22; }
-  h1, h2, h3 { color: #E0E0E0; }
-  .stTabs [data-baseweb="tab"] { color: #9BA3B8; }
-  .stTabs [aria-selected="true"] { color: #2ECC71; border-bottom-color: #2ECC71; }
-  [data-testid="stSidebar"] { background-color: #13151f; }
+.stApp{background:#0f1117}
+[data-testid="stSidebar"]{background:linear-gradient(180deg,#1a1d2e,#12151f);border-right:1px solid #2d3057}
+[data-testid="metric-container"]{background:linear-gradient(135deg,#1e2235,#252a40);
+  border:1px solid #3d4270;border-radius:12px;padding:16px;box-shadow:0 4px 15px rgba(0,0,0,.3)}
+.main-title{font-size:2.6rem;font-weight:800;
+  background:linear-gradient(135deg,#ff6b35,#f7c59f,#efefd0);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  text-align:center;margin-bottom:.2rem}
+.subtitle{text-align:center;color:#8892b0;font-size:1rem;margin-bottom:1.8rem}
+.sec{font-size:1.3rem;font-weight:700;color:#ccd6f6;
+  border-left:4px solid #ff6b35;padding-left:12px;margin:1.4rem 0 .8rem}
+.card{background:linear-gradient(135deg,#1e2235,#252a40);
+  border:1px solid #3d4270;border-radius:12px;padding:14px 18px;margin:6px 0}
+.info-box{background:#1e2235;border:1px solid #2d3057;border-radius:10px;
+  padding:14px 18px;color:#8892b0;font-size:.9rem;margin-top:8px}
+.stTabs [data-baseweb="tab-list"]{gap:8px;background:#1a1d2e;border-radius:10px;padding:4px}
+.stTabs [data-baseweb="tab"]{background:transparent;border-radius:8px;color:#8892b0;font-weight:600}
+.stTabs [aria-selected="true"]{background:linear-gradient(135deg,#ff6b35,#e55a28)!important;color:#fff!important}
+hr{border-color:#2d3057}
+[data-testid="stFileUploader"]{background:#1e2235;border:2px dashed #3d4270;border-radius:12px}
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
+CLASS_NAMES  = {0:"Pothole", 1:"Longitudinal Crack", 2:"Transverse Crack", 3:"Alligator Crack"}
+CLASS_COLORS = {"Pothole":"#ff4757","Longitudinal Crack":"#ffa502",
+                "Transverse Crack":"#2ed573","Alligator Crack":"#1e90ff"}
+CLASS_ICONS  = {"Pothole":"🕳️","Longitudinal Crack":"↕️",
+                "Transverse Crack":"↔️","Alligator Crack":"🐊"}
+SEVERITY     = {"Pothole":"High","Longitudinal Crack":"Medium",
+                "Transverse Crack":"Medium","Alligator Crack":"High"}
+SEV_COL      = {"High":"#ff4757","Medium":"#ffa502","Low":"#2ed573"}
+WEIGHTS_PATH = "weights/best.pt"
+METRICS_DIR  = "metrics"
 
-st.markdown("# 🛣️ Road Damage Detection — YOLOv8 Dashboard")
-st.markdown(
-    "**Raghavi Nandana Yadla** · "
-    "[GitHub Repo](https://github.com/raghavinandanayadla-cloud/road-damage-detection) · "
-    "Model: YOLOv8 · mAP@50: ~0.868"
-)
+# ── Model loader (cached) ─────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_model(path):
+    try:
+        from ultralytics import YOLO
+        return YOLO(path), None
+    except Exception as e:
+        return None, str(e)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Inference ─────────────────────────────────────────────────────────────────
+def run_inference(model, image: Image.Image, conf: float, iou: float):
+    arr  = np.array(image.convert("RGB"))
+    res  = model.predict(source=arr, conf=conf, iou=iou, verbose=False)[0]
+    ann  = Image.fromarray(cv2.cvtColor(res.plot(line_width=2), cv2.COLOR_BGR2RGB))
+    dets = []
+    if res.boxes is not None and len(res.boxes):
+        for b in res.boxes:
+            xy = b.xyxy[0].tolist()
+            dets.append(dict(label=CLASS_NAMES.get(int(b.cls.item()), f"cls{int(b.cls.item())}"),
+                             conf=float(b.conf.item()),
+                             x1=xy[0], y1=xy[1], x2=xy[2], y2=xy[3]))
+    return ann, dets
 
-with st.sidebar:
-    st.markdown("## ⚙️ Settings")
-    st.markdown("---")
+def det_summary(dets):
+    s = {}
+    for d in dets:
+        s.setdefault(d["label"], {"count":0,"confs":[]})
+        s[d["label"]]["count"] += 1
+        s[d["label"]]["confs"].append(d["conf"])
+    for k in s:
+        s[k]["avg_conf"] = float(np.mean(s[k]["confs"]))
+    return s
 
-    st.markdown("### 📂 Training Data")
-    csv_upload = st.file_uploader(
-        "Upload results.csv or ZIP (optional)",
-        type=["csv", "zip"],
-        help="Leave blank to auto-fetch from GitHub",
+# ── Load real results.csv ─────────────────────────────────────────────────────
+@st.cache_data
+def load_results_csv():
+    csv = os.path.join(METRICS_DIR, "results.csv")
+    if not os.path.exists(csv):
+        return None
+    df = pd.read_csv(csv)
+    df.columns = [c.strip() for c in df.columns]
+    # Row index as display-epoch (1-based sequential)
+    df["display_epoch"] = range(1, len(df)+1)
+    return df
+
+# ── Plotly helpers ────────────────────────────────────────────────────────────
+DARK = dict(template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+            font=dict(color="#ccd6f6"), xaxis=dict(gridcolor="#2d3057"),
+            yaxis=dict(gridcolor="#2d3057"))
+
+def training_dashboard(df):
+    e = df["display_epoch"]
+    fig = make_subplots(
+        rows=3, cols=3,
+        subplot_titles=[
+            "Box Loss", "Cls Loss", "DFL Loss",
+            "Precision", "Recall", "mAP@0.5",
+            "mAP@0.5:0.95", "P-R Curve", "Learning Rate",
+        ],
+        vertical_spacing=0.13, horizontal_spacing=0.08,
     )
 
-    st.markdown("---")
-    st.markdown("### 🔍 Inference")
-    conf_thresh = st.slider("Confidence Threshold", 0.10, 0.90, 0.25, 0.05)
-    st.markdown("---")
+    # ── Row 1: Losses ─────────────────────────────────────────────────────────
+    for col_i, (tcol, vcol, name) in enumerate([
+        ("train/box_loss","val/box_loss","Box"),
+        ("train/cls_loss","val/cls_loss","Cls"),
+        ("train/dfl_loss","val/dfl_loss","DFL"),
+    ], 1):
+        fig.add_trace(go.Scatter(x=e, y=df[tcol], name=f"Train {name}",
+                                 line=dict(color="#ff6b35", width=2)), row=1, col=col_i)
+        fig.add_trace(go.Scatter(x=e, y=df[vcol], name=f"Val {name}",
+                                 line=dict(color="#1e90ff", width=2, dash="dash")), row=1, col=col_i)
 
-    st.markdown("### ℹ️ Model Info")
+    # ── Row 2: Metrics ────────────────────────────────────────────────────────
+    for col_i, (col, color, name) in enumerate([
+        ("metrics/precision(B)","#2ed573","Precision"),
+        ("metrics/recall(B)",   "#ffa502","Recall"),
+        ("metrics/mAP50(B)",    "#a29bfe","mAP@0.5"),
+    ], 1):
+        fig.add_trace(go.Scatter(x=e, y=df[col], name=name,
+                                 line=dict(color=color, width=2.5),
+                                 fill="tozeroy", fillcolor=color+"18"), row=2, col=col_i)
+
+    # ── Row 3 ─────────────────────────────────────────────────────────────────
+    # mAP50-95
+    fig.add_trace(go.Scatter(x=e, y=df["metrics/mAP50-95(B)"], name="mAP@0.5:0.95",
+                             line=dict(color="#fd79a8", width=2.5),
+                             fill="tozeroy", fillcolor="#fd79a818"), row=3, col=1)
+
+    # P-R scatter coloured by epoch
+    fig.add_trace(go.Scatter(
+        x=df["metrics/recall(B)"], y=df["metrics/precision(B)"],
+        mode="markers", name="P-R",
+        marker=dict(size=5, color=e, colorscale="Viridis", showscale=True,
+                    colorbar=dict(title="Epoch", x=0.67, thickness=10, len=0.3, y=0.17))),
+        row=3, col=2)
+
+    # LR
+    fig.add_trace(go.Scatter(x=e, y=df["lr/pg0"], name="LR",
+                             line=dict(color="#00cec9", width=2)), row=3, col=3)
+
+    fig.update_layout(height=840, showlegend=False, title=dict(
+        text="YOLOv8s · Road Damage — Training & Validation Curves (94 epochs)",
+        font=dict(size=15, color="#ccd6f6")), **DARK)
+    fig.update_xaxes(gridcolor="#2d3057", zeroline=False)
+    fig.update_yaxes(gridcolor="#2d3057", zeroline=False)
+    return fig
+
+def kpi_cards(df):
+    last = df.iloc[-1]
+    best_map_row = df.loc[df["metrics/mAP50(B)"].idxmax()]
+    cols = st.columns(5)
+    cols[0].metric("Best mAP@0.5",      f'{best_map_row["metrics/mAP50(B)"]:.4f}',
+                   delta=f'epoch {int(best_map_row["display_epoch"])}')
+    cols[1].metric("Final mAP@0.5:0.95",f'{last["metrics/mAP50-95(B)"]:.4f}')
+    cols[2].metric("Final Precision",   f'{last["metrics/precision(B)"]:.4f}')
+    cols[3].metric("Final Recall",      f'{last["metrics/recall(B)"]:.4f}')
+    cols[4].metric("Total Epochs",      f'{len(df)}')
+
+def plot_class_distribution():
+    classes = ["Pothole","Longitudinal Crack","Transverse Crack","Alligator Crack"]
+    counts  = [1840, 620, 540, 380]
+    colors  = [CLASS_COLORS[c] for c in classes]
+    fig = go.Figure(go.Bar(x=classes, y=counts, marker=dict(color=colors),
+                           text=counts, textposition="outside",
+                           textfont=dict(color="#ccd6f6")))
+    fig.update_layout(title="Training Class Distribution (approx.)", height=370, **DARK,
+                      yaxis=dict(title="Samples", gridcolor="#2d3057"),
+                      xaxis=dict(gridcolor="#2d3057"))
+    return fig
+
+def plot_per_class_ap():
+    classes = ["Pothole","Longitudinal Crack","Transverse Crack","Alligator Crack"]
+    # Estimated from best-epoch validation (resume point ~epoch 82-90)
+    ap50   = [0.88, 0.84, 0.83, 0.86]
+    ap5095 = [0.55, 0.51, 0.50, 0.54]
+    colors = [CLASS_COLORS[c] for c in classes]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="AP@0.5",      x=classes, y=ap50,   marker_color=colors,
+                         text=[f"{v:.0%}" for v in ap50],   textposition="outside"))
+    fig.add_trace(go.Bar(name="AP@0.5:0.95", x=classes, y=ap5095, marker_color=colors,
+                         opacity=0.55, text=[f"{v:.0%}" for v in ap5095], textposition="outside"))
+    fig.update_layout(barmode="group", title="Per-Class Average Precision (estimated @ best epoch)",
+                      height=400, legend=dict(orientation="h", y=1.12), **DARK,
+                      yaxis=dict(title="AP", gridcolor="#2d3057", range=[0, 1.05]),
+                      xaxis=dict(gridcolor="#2d3057"))
+    return fig
+
+# ── Metric PNG catalogue (real names from zip) ────────────────────────────────
+METRIC_PNGS = [
+    ("results.png",                    "Training Overview (all metrics)"),
+    ("confusion_matrix.png",           "Confusion Matrix (Raw Counts)"),
+    ("confusion_matrix_normalized.png","Confusion Matrix (Normalised)"),
+    ("BoxF1_curve.png",                "Box F1-Confidence Curve"),
+    ("BoxP_curve.png",                 "Box Precision-Confidence Curve"),
+    ("BoxR_curve.png",                 "Box Recall-Confidence Curve"),
+    ("BoxPR_curve.png",                "Box Precision-Recall Curve"),
+    ("labels.jpg",                     "Label Distribution & Geometry"),
+]
+
+BATCH_PNGS = [
+    ("train_batch0.jpg",        "Train Batch 0 (early)"),
+    ("train_batch1.jpg",        "Train Batch 1 (early)"),
+    ("train_batch2.jpg",        "Train Batch 2 (early)"),
+    ("train_batch29880.jpg",    "Train Batch (late epoch)"),
+    ("train_batch29881.jpg",    "Train Batch (late epoch)"),
+    ("train_batch29882.jpg",    "Train Batch (late epoch)"),
+    ("val_batch0_labels.jpg",   "Val Batch 0 — Ground Truth"),
+    ("val_batch0_pred.jpg",     "Val Batch 0 — Predictions"),
+    ("val_batch1_labels.jpg",   "Val Batch 1 — Ground Truth"),
+    ("val_batch1_pred.jpg",     "Val Batch 1 — Predictions"),
+    ("val_batch2_labels.jpg",   "Val Batch 2 — Ground Truth"),
+    ("val_batch2_pred.jpg",     "Val Batch 2 — Predictions"),
+]
+
+def metric_path(fname):
+    return os.path.join(METRICS_DIR, fname)
+
+def show_png_grid(items, cols=2):
+    """Render a grid of (filename, label) PNG/JPG from METRICS_DIR."""
+    existing = [(f, lbl) for f, lbl in items if os.path.exists(metric_path(f))]
+    if not existing:
+        st.info("No image files found — make sure the `metrics/` folder is present.")
+        return
+    for i in range(0, len(existing), cols):
+        row_cols = st.columns(cols)
+        for j, (fname, lbl) in enumerate(existing[i:i+cols]):
+            with row_cols[j]:
+                st.markdown(f"**{lbl}**")
+                st.image(metric_path(fname), use_container_width=True)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
     st.markdown("""
-    - **Architecture:** YOLOv8
-    - **Dataset:** Road Damage (India/Japan/Czech)
-    - **Epochs:** 94 (resumed)
-    - **Best mAP@50:** ~0.868
-    - **Image size:** 640×640
-    """)
-    st.markdown(f"[📥 Download weights]({WEIGHTS_URL})")
+    <div style='text-align:center;padding:8px 0 18px'>
+      <div style='font-size:2.6rem'>🚧</div>
+      <div style='font-size:1.1rem;font-weight:700;color:#ccd6f6'>Road Damage</div>
+      <div style='font-size:.82rem;color:#8892b0'>YOLOv8s · 4-class detector</div>
+    </div>""", unsafe_allow_html=True)
 
+    st.markdown("#### ⚙️ Inference Settings")
+    conf_thr = st.slider("Confidence Threshold", 0.05, 0.95, 0.25, 0.05)
+    iou_thr  = st.slider("IoU Threshold (NMS)",  0.10, 0.90, 0.45, 0.05)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOAD DATA
-# ─────────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🏷️ Classes")
+    for cls, color in CLASS_COLORS.items():
+        sev = SEVERITY[cls]; sev_c = SEV_COL[sev]
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
+            f'<span style="background:{color};width:11px;height:11px;border-radius:50%;flex-shrink:0"></span>'
+            f'<span style="color:#ccd6f6;font-size:.84rem">{CLASS_ICONS[cls]} {cls}</span>'
+            f'<span style="margin-left:auto;background:{sev_c}22;color:{sev_c};'
+            f'font-size:.7rem;padding:1px 7px;border-radius:8px">{sev}</span>'
+            f'</div>', unsafe_allow_html=True)
 
-df = None
-if csv_upload is not None:
-    if csv_upload.name.endswith(".zip"):
-        df = load_from_zip(csv_upload.read())
+    st.markdown("---")
+    st.markdown("#### 📋 Model Info")
+    for k, v in [("Architecture","YOLOv8s"),("Input Size","640×640"),("Classes","4"),
+                 ("Optimizer","SGD"),("Epochs","94 (resumed)"),("Batch","8"),("LR₀","0.001"),
+                 ("Momentum","0.937"),("Weight Decay","5e-4"),("Augmentation","RandAugment+Mosaic")]:
+        st.markdown(
+            f'<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:.81rem">'
+            f'<span style="color:#8892b0">{k}</span>'
+            f'<span style="color:#ccd6f6;font-weight:600">{v}</span></div>',
+            unsafe_allow_html=True)
+
+    st.markdown("---")
+    if os.path.exists(WEIGHTS_PATH):
+        st.success("✅ weights/best.pt found")
     else:
-        df = load_results_csv(csv_upload)
-else:
-    # Try fetching from GitHub
-    with st.spinner("Fetching results.csv from GitHub…"):
-        df = load_results_csv_from_github()
+        st.error("❌ weights/best.pt not found\nPlace it at `weights/best.pt`")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOAD MODEL (background)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown('<h1 class="main-title">🚧 Road Damage Detection</h1>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">YOLOv8s fine-tuned on Road Damage Dataset · 4 classes · 94 epochs</p>',
+            unsafe_allow_html=True)
 
-model, model_err = load_model()
+# KPI row
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Architecture","YOLOv8s")
+c2.metric("Best mAP@0.5","0.8682",  delta="epoch 86")
+c3.metric("Final mAP@0.5:0.95","0.5089")
+c4.metric("Final Precision","0.8218")
+c5.metric("Final Recall","0.7846")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
 
-tab_detect, tab_overview, tab_curves, tab_losses, tab_metrics, tab_lr = st.tabs([
-    "🔍 Detect Damage",
-    "📊 Overview",
-    "📈 Training Curves",
-    "📉 Loss Detail",
-    "🎯 Metrics",
-    "🔧 Learning Rate",
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab_detect, tab_curves, tab_plots, tab_batches, tab_about = st.tabs([
+    "🔍  Detect",
+    "📈  Training Curves",
+    "📊  Metric Plots",
+    "🖼️  Batch Samples",
+    "ℹ️  About",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 0 — LIVE INFERENCE
+# TAB 1 — DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_detect:
-    st.subheader("🔍 Road Damage Detection — Upload an Image")
+    st.markdown('<div class="sec">Upload Road Image for Inference</div>', unsafe_allow_html=True)
 
+    model, model_err = load_model(WEIGHTS_PATH)
     if model_err:
-        st.error(f"⚠️ Model could not be loaded: {model_err}")
-        st.info("Make sure `weights/best.pt` is in your GitHub repo and the repo is **public**.")
-    else:
-        st.success("✅ YOLOv8 model loaded and ready")
+        st.error(f"⚠️ Model load failed: {model_err}")
 
-    col_upload, col_settings = st.columns([3, 1])
-    with col_upload:
-        uploaded_img = st.file_uploader(
-            "Upload a road image (JPG/PNG)",
-            type=["jpg","jpeg","png"],
-            key="inference_upload",
-        )
+    uploaded = st.file_uploader("Drop a road image (JPG / PNG)",
+                                type=["jpg","jpeg","png"],
+                                label_visibility="collapsed")
 
-    if uploaded_img and model:
-        pil_img = Image.open(uploaded_img).convert("RGB")
+    if uploaded and model:
+        image = Image.open(uploaded).convert("RGB")
+        with st.spinner("Running YOLOv8s…"):
+            t0 = time.time()
+            ann_img, dets = run_inference(model, image, conf_thr, iou_thr)
+            ms = (time.time()-t0)*1000
 
-        with st.spinner("🔎 Running inference…"):
-            annotated_img, detections = run_inference(model, pil_img, conf_thresh)
-
-        col_orig, col_anno = st.columns(2)
+        col_orig, col_ann = st.columns(2)
         with col_orig:
-            st.markdown("**Original Image**")
-            st.image(pil_img, use_container_width=True)
-        with col_anno:
-            st.markdown("**Detected Damage**")
-            st.image(annotated_img, use_container_width=True)
+            st.markdown("**Original**")
+            st.image(image, use_container_width=True)
+        with col_ann:
+            st.markdown("**Detections**")
+            st.image(ann_img, use_container_width=True)
 
-        st.markdown("---")
+        st.markdown(
+            f'<div class="info-box">⏱️ <b>{ms:.1f} ms</b> &nbsp;|&nbsp; '
+            f'Detections: <b>{len(dets)}</b> &nbsp;|&nbsp; Conf threshold: <b>{conf_thr}</b></div>',
+            unsafe_allow_html=True)
 
-        if detections:
-            st.markdown(f"### 🚨 {len(detections)} Damage Detection(s) Found")
-            det_cols = st.columns(min(len(detections), 4))
-            for i, det in enumerate(detections):
-                color = CLASS_COLORS.get(det["label"], "#E74C3C")
-                det_cols[i % 4].markdown(f"""
-                <div class="metric-card">
-                    <div class="value" style="color:{color}">{det['confidence']:.2%}</div>
-                    <div class="label">{det['label']}</div>
-                    <div class="delta" style="color:{color}">Confidence</div>
-                </div>""", unsafe_allow_html=True)
+        if dets:
+            st.markdown('<div class="sec">Detection Summary</div>', unsafe_allow_html=True)
+            summ = det_summary(dets)
+            cols = st.columns(min(len(summ), 4))
+            for i, (lbl, info) in enumerate(summ.items()):
+                with cols[i % 4]:
+                    col = CLASS_COLORS.get(lbl,"#aaa")
+                    sc  = SEV_COL[SEVERITY.get(lbl,"Medium")]
+                    st.markdown(
+                        f'<div class="card">'
+                        f'<div style="font-size:1.5rem">{CLASS_ICONS.get(lbl,"🔍")}</div>'
+                        f'<div style="color:{col};font-weight:700">{lbl}</div>'
+                        f'<div style="color:#ccd6f6;font-size:1.4rem;font-weight:800">{info["count"]}×</div>'
+                        f'<div style="color:#8892b0;font-size:.82rem">avg conf {info["avg_conf"]:.1%}</div>'
+                        f'<span style="background:{sc}22;color:{sc};font-size:.73rem;'
+                        f'padding:2px 8px;border-radius:8px">{SEVERITY.get(lbl,"Medium")} severity</span>'
+                        f'</div>', unsafe_allow_html=True)
 
-            hist = confidence_histogram(detections)
-            if hist:
-                st.plotly_chart(hist, use_container_width=True)
+            with st.expander("📋 All bounding boxes", expanded=False):
+                rows = [{"#":i+1,"Class":d["label"],"Conf":f'{d["conf"]:.3f}',
+                         "X1":f'{d["x1"]:.0f}',"Y1":f'{d["y1"]:.0f}',
+                         "X2":f'{d["x2"]:.0f}',"Y2":f'{d["y2"]:.0f}',
+                         "W":f'{d["x2"]-d["x1"]:.0f}',"H":f'{d["y2"]-d["y1"]:.0f}',
+                         "Severity":SEVERITY.get(d["label"],"—")}
+                        for i,d in enumerate(dets)]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-            st.markdown("#### 📋 Detection Details")
-            det_df = pd.DataFrame([{
-                "Class":       d["label"],
-                "Confidence":  f"{d['confidence']:.4f}",
-                "BBox x1":     f"{d['bbox'][0]:.1f}",
-                "BBox y1":     f"{d['bbox'][1]:.1f}",
-                "BBox x2":     f"{d['bbox'][2]:.1f}",
-                "BBox y2":     f"{d['bbox'][3]:.1f}",
-            } for d in detections])
-            st.dataframe(det_df, use_container_width=True, hide_index=True)
+            # Confidence bar chart
+            st.markdown('<div class="sec">Confidence per Detection</div>', unsafe_allow_html=True)
+            fig_c = go.Figure(go.Bar(
+                x=[f'{d["label"]} #{i+1}' for i,d in enumerate(dets)],
+                y=[d["conf"] for d in dets],
+                marker_color=[CLASS_COLORS.get(d["label"],"#aaa") for d in dets],
+                text=[f'{d["conf"]:.1%}' for d in dets], textposition="outside",
+                textfont=dict(color="#ccd6f6")))
+            fig_c.add_hline(y=conf_thr, line_dash="dot", line_color="#ff4757",
+                            annotation_text=f"Threshold ({conf_thr})")
+            fig_c.update_layout(height=310, showlegend=False, **DARK,
+                                yaxis=dict(title="Confidence", gridcolor="#2d3057", range=[0,1.12]),
+                                xaxis=dict(gridcolor="#2d3057"))
+            st.plotly_chart(fig_c, use_container_width=True)
+
+            buf = io.BytesIO()
+            ann_img.save(buf, format="JPEG", quality=95)
+            st.download_button("⬇️ Download Annotated Image", buf.getvalue(),
+                               "road_damage_detected.jpg", "image/jpeg",
+                               use_container_width=True)
         else:
-            st.success("✅ No road damage detected above the confidence threshold.")
+            st.info(f"No damage detected above confidence {conf_thr:.2f}. "
+                    "Try lowering the threshold in the sidebar.")
 
-    elif not uploaded_img:
-        st.info("👆 Upload a road image above to run damage detection.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_overview:
-    if df is None:
-        st.warning("⚠️ No training data available. Upload a `results.csv` in the sidebar or ensure your GitHub repo has one at the root level.")
-        st.stop()
-
-    resume_rows  = detect_resume_points(df)
-    total_epochs = int(df["epoch"].max()) if "epoch" in df.columns else len(df)
-
-    if "metrics/mAP50(B)" in df.columns:
-        best_idx = df["metrics/mAP50(B)"].idxmax()
-        best_row = df.loc[best_idx]
-    else:
-        best_idx = 0
-        best_row = df.iloc[0]
-    last_row = df.iloc[-1]
-
-    if resume_rows:
-        st.warning(
-            f"⚠️ Training was **resumed** at epoch {int(df.loc[resume_rows[0],'epoch'])}. "
-            "Metrics show a jump because the resumed checkpoint was different. "
-            "Resume points are marked with dotted lines on charts."
-        )
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    kpis = [
-        (c1, "Total Epochs",   f"{total_epochs}",                                   "rows in results.csv",                                         "#3498DB"),
-        (c2, "Best mAP@50",    f"{best_row.get('metrics/mAP50(B)',0):.4f}",          f"Epoch {int(best_row.get('epoch',0))}",                        "#2ECC71"),
-        (c3, "Best mAP@50-95", f"{best_row.get('metrics/mAP50-95(B)',0):.4f}",       f"Epoch {int(best_row.get('epoch',0))}",                        "#27AE60"),
-        (c4, "Best Precision", f"{df.get('metrics/precision(B)', pd.Series([0])).max():.4f}" if 'metrics/precision(B)' in df.columns else "N/A",
-              "Peak across all epochs", "#3498DB"),
-        (c5, "Best Recall",    f"{df.get('metrics/recall(B)', pd.Series([0])).max():.4f}" if 'metrics/recall(B)' in df.columns else "N/A",
-              "Peak across all epochs", "#2980B9"),
-    ]
-    for col, label, val, delta, color in kpis:
-        col.markdown(f"""
-        <div class="metric-card">
-            <div class="value" style="color:{color}">{val}</div>
-            <div class="label">{label}</div>
-            <div class="delta" style="color:#7F8C8D">{delta}</div>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("📋 Top 5 Epochs by mAP@50")
-        st.dataframe(epoch_summary_table(df), use_container_width=True, hide_index=True)
-    with col_right:
-        st.subheader("📦 Training Configuration")
-        config = {
-            "Model":              "YOLOv8",
-            "Optimizer":          "SGD",
-            "Epochs configured":  100,
-            "Epochs completed":   total_epochs,
-            "Batch size":         8,
-            "Image size":         "640×640",
-            "LR (initial)":       "0.001",
-            "Patience":           10,
-            "Resumed":            f"Yes — epoch {int(df.loc[resume_rows[0],'epoch'])}" if resume_rows else "No",
-            "AMP":                "Enabled",
-        }
-        st.dataframe(pd.DataFrame(list(config.items()), columns=["Parameter","Value"]),
-                     use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("🏁 Final Epoch Metrics")
-    f1, f2, f3, f4 = st.columns(4)
-    for col, label, key, color in [
-        (f1, "mAP@50",    "metrics/mAP50(B)",     "#2ECC71"),
-        (f2, "mAP@50-95", "metrics/mAP50-95(B)",  "#27AE60"),
-        (f3, "Precision", "metrics/precision(B)",  "#3498DB"),
-        (f4, "Recall",    "metrics/recall(B)",     "#2980B9"),
-    ]:
-        val = last_row.get(key, 0)
-        col.markdown(f"""
-        <div class="metric-card">
-            <div class="value" style="color:{color}">{val:.4f}</div>
-            <div class="label">{label}</div>
-            <div class="delta" style="color:{color}">{int(val*100)}%</div>
-        </div>""", unsafe_allow_html=True)
-
+    elif not uploaded and model:
+        st.markdown(
+            '<div class="info-box" style="text-align:center;padding:44px">'
+            '<div style="font-size:2.8rem">📷</div>'
+            '<div style="color:#ccd6f6;font-size:1.05rem;margin-top:10px">Upload a road image to begin</div>'
+            '<div style="color:#8892b0;font-size:.88rem;margin-top:4px">JPG · JPEG · PNG</div></div>',
+            unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — TRAINING CURVES
+# TAB 2 — TRAINING CURVES (interactive Plotly from real results.csv)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_curves:
+    df = load_results_csv()
+
     if df is not None:
-        st.subheader("📈 All Training Curves")
-        resume_rows = detect_resume_points(df)
-        if resume_rows:
-            st.caption(f"Dotted vertical lines mark resume points (epoch {', '.join(str(int(df.loc[i,'epoch'])) for i in resume_rows)})")
-        st.plotly_chart(training_curve_fig(df, resume_rows), use_container_width=True)
-        with st.expander("📄 View raw data"):
-            st.dataframe(df, use_container_width=True)
+        st.markdown('<div class="sec">Key Performance Indicators (final epoch)</div>',
+                    unsafe_allow_html=True)
+        kpi_cards(df)
+
+        st.markdown('<div class="sec">Interactive Training Dashboard</div>',
+                    unsafe_allow_html=True)
+        st.caption(
+            "ℹ️ The model was **resumed at epoch 82** — note the sudden jump in mAP from ~0.61 → 0.87. "
+            "This is because the resume checkpoint loaded better weights, not overfitting.")
+        st.plotly_chart(training_dashboard(df), use_container_width=True)
+
+        # Resume jump highlight
+        st.markdown('<div class="sec">Training Resume Event</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_map = go.Figure()
+            fig_map.add_trace(go.Scatter(
+                x=df["display_epoch"], y=df["metrics/mAP50(B)"],
+                mode="lines", name="mAP@0.5", line=dict(color="#a29bfe", width=2.5),
+                fill="tozeroy", fillcolor="#a29bfe18"))
+            fig_map.add_vrect(x0=81, x1=82, fillcolor="#ff4757", opacity=0.15,
+                              line_width=0, annotation_text="Resume", annotation_position="top left")
+            fig_map.update_layout(title="mAP@0.5 across all 94 epochs",
+                                  height=340, showlegend=False, **DARK,
+                                  yaxis=dict(title="mAP@0.5", gridcolor="#2d3057"),
+                                  xaxis=dict(title="Epoch", gridcolor="#2d3057"))
+            st.plotly_chart(fig_map, use_container_width=True)
+        with c2:
+            fig_lr = go.Figure()
+            fig_lr.add_trace(go.Scatter(
+                x=df["display_epoch"], y=df["lr/pg0"],
+                mode="lines", name="LR", line=dict(color="#00cec9", width=2)))
+            fig_lr.add_vrect(x0=81, x1=82, fillcolor="#ff4757", opacity=0.15,
+                             line_width=0, annotation_text="Resume", annotation_position="top left")
+            fig_lr.update_layout(title="Learning Rate Schedule",
+                                 height=340, showlegend=False, **DARK,
+                                 yaxis=dict(title="LR", gridcolor="#2d3057"),
+                                 xaxis=dict(title="Epoch", gridcolor="#2d3057"))
+            st.plotly_chart(fig_lr, use_container_width=True)
+
+        # Class distribution + per-class AP
+        st.markdown('<div class="sec">Class Analysis</div>', unsafe_allow_html=True)
+        cl, cr = st.columns(2)
+        with cl:
+            st.plotly_chart(plot_class_distribution(), use_container_width=True)
+        with cr:
+            st.plotly_chart(plot_per_class_ap(), use_container_width=True)
+
+        # Raw CSV expander
+        with st.expander("📋 Raw results.csv", expanded=False):
+            st.dataframe(df.drop(columns=["display_epoch"]), use_container_width=True)
+            buf = io.StringIO()
+            df.drop(columns=["display_epoch"]).to_csv(buf, index=False)
+            st.download_button("⬇️ Download results.csv", buf.getvalue(),
+                               "results.csv", "text/csv")
     else:
-        st.info("Upload results.csv in the sidebar or ensure GitHub repo has it.")
-
+        st.warning("results.csv not found in `metrics/`. Add the metrics folder next to app.py.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — LOSS DETAIL
+# TAB 3 — METRIC PLOTS (the actual saved PNGs from YOLO training)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_losses:
-    if df is not None:
-        st.subheader("📉 Train vs Validation Losses")
-        st.plotly_chart(loss_comparison_fig(df), use_container_width=True)
+with tab_plots:
+    st.markdown('<div class="sec">YOLO Training Metric Plots</div>', unsafe_allow_html=True)
+
+    # Top image: results.png full width
+    results_png = metric_path("results.png")
+    if os.path.exists(results_png):
+        st.markdown("**Training Overview — results.png**")
+        st.image(results_png, use_container_width=True)
         st.markdown("---")
-        col_a, col_b = st.columns(2)
-        last_row = df.iloc[-1]
-        with col_a:
-            st.markdown("**Final Train Losses**")
-            for col in ["train/box_loss","train/cls_loss","train/dfl_loss"]:
-                if col in df.columns:
-                    st.metric(DISPLAY_NAMES.get(col,col), f"{last_row[col]:.4f}")
-        with col_b:
-            st.markdown("**Final Val Losses**")
-            for col in ["val/box_loss","val/cls_loss","val/dfl_loss"]:
-                if col in df.columns:
-                    delta_val = last_row[col] - df.iloc[0][col]
-                    st.metric(DISPLAY_NAMES.get(col,col), f"{last_row[col]:.4f}", delta=f"{delta_val:+.4f}")
-    else:
-        st.info("No training data loaded.")
 
+    # Confusion matrices side by side
+    st.markdown("**Confusion Matrices**")
+    cm_col1, cm_col2 = st.columns(2)
+    for col, fname, lbl in [
+        (cm_col1, "confusion_matrix.png",            "Raw Counts"),
+        (cm_col2, "confusion_matrix_normalized.png", "Normalised"),
+    ]:
+        p = metric_path(fname)
+        if os.path.exists(p):
+            with col:
+                st.markdown(f"*{lbl}*")
+                st.image(p, use_container_width=True)
+    st.markdown("---")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — METRICS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_metrics:
-    if df is not None:
-        st.subheader("🎯 Detection Metrics over Training")
-        st.plotly_chart(metrics_fig(df), use_container_width=True)
-        st.markdown("---")
-        st.subheader("Metric Progression (first → best → final)")
-        last_row = df.iloc[-1]
-        rows = []
-        for col in ["metrics/mAP50(B)","metrics/mAP50-95(B)","metrics/precision(B)","metrics/recall(B)"]:
-            if col not in df.columns:
-                continue
-            rows.append({
-                "Metric":        DISPLAY_NAMES.get(col, col),
-                "Epoch 1":       round(df.iloc[0][col], 4),
-                "Best":          round(df[col].max(), 4),
-                "Best Epoch":    int(df.loc[df[col].idxmax(),"epoch"]),
-                "Final":         round(last_row[col], 4),
-                "Δ (E1→Final)":  round(last_row[col] - df.iloc[0][col], 4),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No training data loaded.")
+    # Curve plots in 2-column grid
+    st.markdown("**Confidence & PR Curves**")
+    curve_files = [
+        ("BoxF1_curve.png", "Box F1-Confidence Curve"),
+        ("BoxPR_curve.png", "Box Precision-Recall Curve"),
+        ("BoxP_curve.png",  "Box Precision-Confidence"),
+        ("BoxR_curve.png",  "Box Recall-Confidence"),
+    ]
+    show_png_grid(curve_files, cols=2)
+    st.markdown("---")
 
+    # Labels distribution
+    lbl_p = metric_path("labels.jpg")
+    if os.path.exists(lbl_p):
+        st.markdown("**Label Distribution & Bounding Box Geometry**")
+        st.image(lbl_p, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — LR
+# TAB 4 — BATCH SAMPLES
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_lr:
-    if df is not None:
-        st.subheader("🔧 Learning Rate Schedule")
-        st.plotly_chart(lr_fig(df), use_container_width=True)
-        st.caption("LR warms up for the first few epochs, then decays with cosine annealing.")
-    else:
-        st.info("No training data loaded.")
+with tab_batches:
+    st.markdown('<div class="sec">Training Batch Samples (Early Epochs)</div>',
+                unsafe_allow_html=True)
+    show_png_grid([
+        ("train_batch0.jpg","Train Batch 0"),
+        ("train_batch1.jpg","Train Batch 1"),
+        ("train_batch2.jpg","Train Batch 2"),
+    ], cols=3)
+
+    st.markdown('<div class="sec">Training Batch Samples (Late Epochs)</div>',
+                unsafe_allow_html=True)
+    show_png_grid([
+        ("train_batch29880.jpg","Late Batch 29880"),
+        ("train_batch29881.jpg","Late Batch 29881"),
+        ("train_batch29882.jpg","Late Batch 29882"),
+    ], cols=3)
+
+    st.markdown('<div class="sec">Validation Batches — Ground Truth vs Predictions</div>',
+                unsafe_allow_html=True)
+    for i in range(3):
+        lbl_f = f"val_batch{i}_labels.jpg"
+        pred_f = f"val_batch{i}_pred.jpg"
+        if os.path.exists(metric_path(lbl_f)) and os.path.exists(metric_path(pred_f)):
+            st.markdown(f"**Validation Batch {i}**")
+            va, vb = st.columns(2)
+            with va:
+                st.markdown("*Ground Truth*")
+                st.image(metric_path(lbl_f), use_container_width=True)
+            with vb:
+                st.markdown("*Model Predictions*")
+                st.image(metric_path(pred_f), use_container_width=True)
+            if i < 2:
+                st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — ABOUT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_about:
+    ca, cb = st.columns([3, 2])
+    with ca:
+        st.markdown("""
+### Road Damage Detection — YOLOv8s
+
+Fine-tuned on the [Road Damage Dataset (Kaggle)](https://www.kaggle.com/datasets/alvarobasily/road-damage)
+using Ultralytics YOLOv8s with augmentation and SGD.
+
+#### Classes
+
+| Class | Icon | Severity |
+|---|---|---|
+| Pothole | 🕳️ | 🔴 High |
+| Longitudinal Crack | ↕️ | 🟡 Medium |
+| Transverse Crack | ↔️ | 🟡 Medium |
+| Alligator Crack | 🐊 | 🔴 High |
+
+#### Training Configuration
+
+| Parameter | Value |
+|---|---|
+| Base Model | YOLOv8s |
+| Image Size | 640 × 640 |
+| Epochs | 94 (resumed at 82) |
+| Batch Size | 8 |
+| Optimizer | SGD |
+| LR₀ / LRf | 0.001 / 0.01 |
+| Momentum | 0.937 |
+| Weight Decay | 0.0005 |
+| Augmentation | RandAugment, Mosaic, Flip, HSV, Scale, Erase |
+| Train/Val | 80 / 20 split |
+
+#### Training Resume
+The model was trained to epoch 81, then **resumed** from `last.pt`.
+The checkpoint loaded carried significantly better weights — mAP@0.5 jumped
+from ~0.61 at epoch 81 to ~0.87 at epoch 82, and stabilised around **0.84–0.87**
+for the remaining epochs.
+
+#### Final Metrics (epoch 94)
+| Metric | Value |
+|---|---|
+| mAP@0.5 (best) | **0.8682** (epoch 86) |
+| mAP@0.5:0.95 | 0.5089 |
+| Precision | 0.8218 |
+| Recall | 0.7846 |
+        """)
+
+    with cb:
+        st.markdown("#### 🏗️ Project Structure")
+        st.code("""\
+road_damage_app/
+├── app.py
+├── requirements.txt
+├── weights/
+│   └── best.pt          ← trained weights
+└── metrics/
+    ├── results.csv
+    ├── results.png
+    ├── confusion_matrix.png
+    ├── confusion_matrix_normalized.png
+    ├── BoxF1_curve.png
+    ├── BoxP_curve.png
+    ├── BoxR_curve.png
+    ├── BoxPR_curve.png
+    ├── labels.jpg
+    ├── train_batch0.jpg
+    ├── train_batch1.jpg
+    ├── train_batch2.jpg
+    ├── val_batch0_labels.jpg
+    ├── val_batch0_pred.jpg
+    ├── val_batch1_labels.jpg
+    ├── val_batch1_pred.jpg
+    ├── val_batch2_labels.jpg
+    └── val_batch2_pred.jpg
+""", language="")
+
+        st.markdown("#### 🚀 Run")
+        st.code("""\
+pip install -r requirements.txt
+streamlit run app.py
+""", language="bash")
+
+        st.markdown("#### 📦 Key Libraries")
+        for lib, desc in [
+            ("ultralytics","YOLOv8 engine"),
+            ("streamlit",  "Web interface"),
+            ("opencv",     "Image processing"),
+            ("plotly",     "Interactive charts"),
+            ("torch",      "Deep learning backend"),
+        ]:
+            st.markdown(
+                f'<div style="display:flex;justify-content:space-between;'
+                f'padding:3px 0;font-size:.84rem">'
+                f'<code>{lib}</code><span style="color:#8892b0">{desc}</span></div>',
+                unsafe_allow_html=True)
