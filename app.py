@@ -1,6 +1,6 @@
 """
 Road Damage Detection — YOLOv8
-Streamlit Web Application  •  Light Theme  •  Full Layout
+Streamlit Web Application  
 """
 
 import os, io, time, random, warnings
@@ -413,13 +413,17 @@ def training_curve_fig():
         "DFL Loss":    curve(0.75, 0.12),
     }
     fig = go.Figure()
-    cols = {"Box Loss": "#e05252", "Class Loss": "#3a6fc4", "DFL Loss": "#4a9e6b"}
+    cols = {
+        "Box Loss":   {"line": "#e05252", "fill": "rgba(224,82,82,0.08)"},
+        "Class Loss": {"line": "#3a6fc4", "fill": "rgba(58,111,196,0.08)"},
+        "DFL Loss":   {"line": "#4a9e6b", "fill": "rgba(74,158,107,0.08)"},
+    }
     for name, vals in data.items():
         fig.add_trace(go.Scatter(
             x=epochs, y=vals, mode="lines", name=name,
-            line=dict(color=cols[name], width=2),
+            line=dict(color=cols[name]["line"], width=2),
             fill="tozeroy",
-            fillcolor=cols[name].rstrip(")") + ",0.05)" if cols[name].startswith("rgb") else cols[name] + "12",
+            fillcolor=cols[name]["fill"],
         ))
     fig.update_layout(
         template="plotly_white", paper_bgcolor="#fff", plot_bgcolor="#faf9f6",
@@ -509,6 +513,13 @@ SAMPLE_IMAGES = {
         "confs":   [0.93, 0.82, 0.67],
         "color": "#3a6fc4",
         "emoji": "🐊",
+    },
+    "Sample 4 — Transverse Crack": {
+        "desc": "Concrete road with multiple transverse surface cracks.",
+        "classes": ["transverse_crack", "transverse_crack", "longitudinal_crack"],
+        "confs":   [0.88, 0.79, 0.72],
+        "color": "#4a9e6b",
+        "emoji": "↔️",
     },
 }
 
@@ -654,7 +665,7 @@ st.markdown("""
 
 # Sample image buttons
 st.markdown("**Try Sample Images** — click to load a pre-configured demo:")
-s1, s2, s3, _, _ = st.columns([1, 1, 1, 1, 1])
+s1, s2, s3, s4 = st.columns(4)
 with s1:
     if st.button("🕳️  Sample 1 — Pothole"):
         st.session_state.sample_mode    = "Sample 1 — Pothole"
@@ -668,6 +679,11 @@ with s2:
 with s3:
     if st.button("🐊  Sample 3 — Alligator"):
         st.session_state.sample_mode    = "Sample 3 — Alligator Crack"
+        st.session_state.uploaded_image = None
+        st.session_state.detection_run  = False
+with s4:
+    if st.button("↔️  Sample 4 — Transverse"):
+        st.session_state.sample_mode    = "Sample 4 — Transverse Crack"
         st.session_state.uploaded_image = None
         st.session_state.detection_run  = False
 
@@ -762,6 +778,7 @@ elif st.session_state.sample_mode is not None:
         "Sample 1 — Pothole":            (180, 160, 140),
         "Sample 2 — Longitudinal Crack":  (160, 155, 145),
         "Sample 3 — Alligator Crack":     (150, 145, 135),
+        "Sample 4 — Transverse Crack":    (165, 162, 150),
     }
     base_color = clr_map.get(sample_key, (170, 160, 150))
     arr = np.ones((480, 640, 3), dtype=np.uint8)
