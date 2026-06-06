@@ -326,7 +326,24 @@ REAL_METRICS = {
     "alligator_crack":    {"P": 0.891, "R": 0.829, "mAP50": 0.896, "mAP50_95": 0.607},
 }
 
-MODEL_PATH = "weights/best.pt"
+# Search multiple locations so the app works on Streamlit Cloud,
+# local dev, and any repo layout automatically.
+def _find_model():
+    candidates = [
+        "weights/best.pt",                  # local standard layout
+        "best.pt",                          # repo root
+        "model/best.pt",                    # alternative folder
+        "runs/detect/train/weights/best.pt",# ultralytics default output
+        "runs/detect/run2/weights/best.pt",
+        "/mount/src/road-damage-detection/weights/best.pt",  # Streamlit Cloud
+        "/mount/src/road-damage-detection/best.pt",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+MODEL_PATH = _find_model()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -746,7 +763,7 @@ if st.session_state.uploaded_image is not None:
     active_image = Image.open(io.BytesIO(st.session_state.uploaded_image)).convert("RGB")
     active_name  = st.session_state.image_name
 
-    if os.path.exists(MODEL_PATH):
+    if MODEL_PATH is not None and os.path.exists(MODEL_PATH):
         model, err = load_model(MODEL_PATH)
         if not err:
             with st.spinner("Running YOLOv8 inference…"):
@@ -764,8 +781,9 @@ if st.session_state.uploaded_image is not None:
                                        st.session_state.uploaded_image[:16])
         st.markdown("""
         <div class="demo-banner">
-            🟡 <strong>Demo Mode</strong> — model weights not found at <code>weights/best.pt</code>.
-            Showing simulated detections. Add your <code>best.pt</code> and restart to run live inference.
+            🟡 <strong>Demo Mode</strong> — <code>best.pt</code> not detected in any expected path.
+            Place your trained weights at <code>weights/best.pt</code> (repo root or subfolder)
+            and redeploy to enable live YOLOv8 inference.
         </div>
         """, unsafe_allow_html=True)
 
@@ -1022,6 +1040,12 @@ with c_radar:
     st.markdown("#### Per-Class Radar")
     fig_radar = go.Figure()
     cats = ["Precision", "Recall", "mAP@0.5"]
+    # hex → rgba helper for valid Plotly fillcolor
+    def hex_rgba(hx, alpha=0.10):
+        hx = hx.lstrip("#")
+        r, g, b = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
+        return f"rgba({r},{g},{b},{alpha})"
+
     for cls_name in CLASS_NAMES:
         m  = REAL_METRICS[cls_name]
         vals = [m["P"], m["R"], m["mAP50"]]
@@ -1032,7 +1056,7 @@ with c_radar:
             name=cls_name.replace("_", " ").title(),
             line=dict(color=color, width=2),
             marker=dict(size=6, color=color),
-            fill="toself", fillcolor=color + "18",
+            fill="toself", fillcolor=hex_rgba(color, 0.10),
         ))
     fig_radar.update_layout(
         polar=dict(
