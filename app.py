@@ -758,6 +758,8 @@ if st.session_state.uploaded_image is not None:
 
     active_name = st.session_state.image_name
 
+    active_boxes = []
+
     with st.spinner("Running YOLOv8 inference..."):
         result = model.predict(
             source=np.array(active_image),
@@ -765,20 +767,34 @@ if st.session_state.uploaded_image is not None:
             iou=iou_threshold,
             verbose=False
         )[0]
-            boxes_raw = result.boxes
-            if boxes_raw is not None:
-                for box in boxes_raw:
-                    cls  = int(box.cls[0])
-                    name = CLASS_NAMES[cls] if cls < len(CLASS_NAMES) else f"class_{cls}"
-                    x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-                    active_boxes.append((cls, name, float(box.conf[0]), x1, y1, x2, y2))
-        st.markdown("""
-        <div class="demo-banner">
-            🟡 <strong>Demo Mode</strong> — <code>best.pt</code> not detected in any expected path.
-            Place your trained weights at <code>weights/best.pt</code> (repo root or subfolder)
-            and redeploy to enable live YOLOv8 inference.
-        </div>
-        """, unsafe_allow_html=True)
+
+        boxes_raw = result.boxes
+
+        if boxes_raw is not None:
+            for box in boxes_raw:
+                cls = int(box.cls[0])
+
+                name = (
+                    CLASS_NAMES[cls]
+                    if cls < len(CLASS_NAMES)
+                    else f"class_{cls}"
+                )
+
+                x1, y1, x2, y2 = [
+                    int(v) for v in box.xyxy[0].tolist()
+                ]
+
+                active_boxes.append(
+                    (
+                        cls,
+                        name,
+                        float(box.conf[0]),
+                        x1,
+                        y1,
+                        x2,
+                        y2
+                    )
+                )
 
 # Sample image path
 elif st.session_state.sample_mode is not None:
