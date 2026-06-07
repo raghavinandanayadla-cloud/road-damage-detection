@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 import os, io, time, glob
 import pandas as pd
+import metrics_data as _md   # embedded metric images & CSV
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -171,12 +172,17 @@ def det_summary(dets):
 # ── Load real results.csv ─────────────────────────────────────────────────────
 @st.cache_data
 def load_results_csv():
-    csv = os.path.join(METRICS_DIR, "results.csv")
-    if not os.path.exists(csv):
-        return None
-    df = pd.read_csv(csv)
+    # Try embedded data first, then fall back to disk
+    csv_text = _md.get_csv_text("results.csv")
+    if csv_text:
+        import io as _io
+        df = pd.read_csv(_io.StringIO(csv_text))
+    else:
+        csv = os.path.join(METRICS_DIR, "results.csv")
+        if not os.path.exists(csv):
+            return None
+        df = pd.read_csv(csv)
     df.columns = [c.strip() for c in df.columns]
-    # Row index as display-epoch (1-based sequential)
     df["display_epoch"] = range(1, len(df)+1)
     return df
 
@@ -317,9 +323,20 @@ BATCH_PNGS = [
 def metric_path(fname):
     return os.path.join(METRICS_DIR, fname)
 
+def get_metric_image(fname):
+    """Return image from embedded data or disk, or None."""
+    img = _md.get_image(fname)
+    if img is not None:
+        return img
+    p = metric_path(fname)
+    if os.path.exists(p):
+        from PIL import Image as _PIL
+        return _PIL.open(p)
+    return None
+
 def show_png_grid(items, cols=2):
-    """Render a grid of (filename, label) PNG/JPG from METRICS_DIR."""
-    existing = [(f, lbl) for f, lbl in items if os.path.exists(metric_path(f))]
+    """Render a grid of (filename, label) from embedded data or disk."""
+    existing = [(f, lbl) for f, lbl in items if get_metric_image(f) is not None]
     if not existing:
         st.info("No image files found — make sure the `metrics/` folder is present.")
         return
@@ -328,7 +345,7 @@ def show_png_grid(items, cols=2):
         for j, (fname, lbl) in enumerate(existing[i:i+cols]):
             with row_cols[j]:
                 st.markdown(f"**{lbl}**")
-                st.image(metric_path(fname), use_container_width=True)
+                st.image(get_metric_image(fname), use_container_width=True)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -585,10 +602,10 @@ with tab_plots:
     st.markdown('<div class="sec">YOLO Training Metric Plots</div>', unsafe_allow_html=True)
 
     # Top image: results.png full width
-    results_png = metric_path("results.png")
-    if os.path.exists(results_png):
+    results_img = get_metric_image("results.png")
+    if results_img is not None:
         st.markdown("**Training Overview — results.png**")
-        st.image(results_png, use_container_width=True)
+        st.image(results_img, use_container_width=True)
         st.markdown("---")
 
     # Confusion matrices side by side
@@ -598,11 +615,11 @@ with tab_plots:
         (cm_col1, "confusion_matrix.png",            "Raw Counts"),
         (cm_col2, "confusion_matrix_normalized.png", "Normalised"),
     ]:
-        p = metric_path(fname)
-        if os.path.exists(p):
+        img = get_metric_image(fname)
+        if img is not None:
             with col:
                 st.markdown(f"*{lbl}*")
-                st.image(p, use_container_width=True)
+                st.image(img, use_container_width=True)
     st.markdown("---")
 
     # Curve plots in 2-column grid
@@ -617,10 +634,10 @@ with tab_plots:
     st.markdown("---")
 
     # Labels distribution
-    lbl_p = metric_path("labels.jpg")
-    if os.path.exists(lbl_p):
+    lbl_img = get_metric_image("labels.jpg")
+    if lbl_img is not None:
         st.markdown("**Label Distribution & Bounding Box Geometry**")
-        st.image(lbl_p, use_container_width=True)
+        st.image(lbl_img, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — BATCH SAMPLES
@@ -647,15 +664,17 @@ with tab_batches:
     for i in range(3):
         lbl_f = f"val_batch{i}_labels.jpg"
         pred_f = f"val_batch{i}_pred.jpg"
-        if os.path.exists(metric_path(lbl_f)) and os.path.exists(metric_path(pred_f)):
+        lbl_img2  = get_metric_image(lbl_f)
+        pred_img2 = get_metric_image(pred_f)
+        if lbl_img2 is not None and pred_img2 is not None:
             st.markdown(f"**Validation Batch {i}**")
             va, vb = st.columns(2)
             with va:
                 st.markdown("*Ground Truth*")
-                st.image(metric_path(lbl_f), use_container_width=True)
+                st.image(lbl_img2, use_container_width=True)
             with vb:
                 st.markdown("*Model Predictions*")
-                st.image(metric_path(pred_f), use_container_width=True)
+                st.image(pred_img2, use_container_width=True)
             if i < 2:
                 st.markdown("---")
 
