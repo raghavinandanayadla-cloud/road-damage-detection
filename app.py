@@ -261,7 +261,9 @@ def plot_class_distribution():
     fig = go.Figure(go.Bar(x=classes, y=counts, marker=dict(color=colors),
                            text=counts, textposition="outside",
                            textfont=dict(color="#ccd6f6")))
-    fig.update_layout(title="Training Class Distribution (approx.)", height=370, **DARK,
+    fig.update_layout(title="Training Class Distribution (approx.)", height=370,
+                      template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+                      font=dict(color="#ccd6f6"),
                       yaxis=dict(title="Samples", gridcolor="#2d3057"),
                       xaxis=dict(gridcolor="#2d3057"))
     return fig
@@ -278,7 +280,9 @@ def plot_per_class_ap():
     fig.add_trace(go.Bar(name="AP@0.5:0.95", x=classes, y=ap5095, marker_color=colors,
                          opacity=0.55, text=[f"{v:.0%}" for v in ap5095], textposition="outside"))
     fig.update_layout(barmode="group", title="Per-Class Average Precision (estimated @ best epoch)",
-                      height=400, legend=dict(orientation="h", y=1.12), **DARK,
+                      height=400, legend=dict(orientation="h", y=1.12),
+                      template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+                      font=dict(color="#ccd6f6"),
                       yaxis=dict(title="AP", gridcolor="#2d3057", range=[0, 1.05]),
                       xaxis=dict(gridcolor="#2d3057"))
     return fig
@@ -478,9 +482,14 @@ with tab_detect:
                 textfont=dict(color="#ccd6f6")))
             fig_c.add_hline(y=conf_thr, line_dash="dot", line_color="#ff4757",
                             annotation_text=f"Threshold ({conf_thr})")
-            fig_c.update_layout(height=310, showlegend=False, **DARK,
-                                yaxis=dict(title="Confidence", gridcolor="#2d3057", range=[0,1.12]),
-                                xaxis=dict(gridcolor="#2d3057"))
+            fig_c.update_layout(
+                height=310, showlegend=False,
+                template="plotly_dark",
+                paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+                font=dict(color="#ccd6f6"),
+                yaxis=dict(title="Confidence", gridcolor="#2d3057", range=[0,1.12]),
+                xaxis=dict(gridcolor="#2d3057"),
+            )
             st.plotly_chart(fig_c, use_container_width=True)
 
             buf = io.BytesIO()
@@ -530,7 +539,9 @@ with tab_curves:
             fig_map.add_vrect(x0=81, x1=82, fillcolor="#ff4757", opacity=0.15,
                               line_width=0, annotation_text="Resume", annotation_position="top left")
             fig_map.update_layout(title="mAP@0.5 across all 94 epochs",
-                                  height=340, showlegend=False, **DARK,
+                                  height=340, showlegend=False,
+                                  template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+                                  font=dict(color="#ccd6f6"),
                                   yaxis=dict(title="mAP@0.5", gridcolor="#2d3057"),
                                   xaxis=dict(title="Epoch", gridcolor="#2d3057"))
             st.plotly_chart(fig_map, use_container_width=True)
@@ -542,7 +553,9 @@ with tab_curves:
             fig_lr.add_vrect(x0=81, x1=82, fillcolor="#ff4757", opacity=0.15,
                              line_width=0, annotation_text="Resume", annotation_position="top left")
             fig_lr.update_layout(title="Learning Rate Schedule",
-                                 height=340, showlegend=False, **DARK,
+                                 height=340, showlegend=False,
+                                 template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
+                                 font=dict(color="#ccd6f6"),
                                  yaxis=dict(title="LR", gridcolor="#2d3057"),
                                  xaxis=dict(title="Epoch", gridcolor="#2d3057"))
             st.plotly_chart(fig_lr, use_container_width=True)
