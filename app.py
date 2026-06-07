@@ -62,33 +62,77 @@ SEV_COL      = {"High":"#ff4757","Medium":"#ffa502","Low":"#2ed573"}
 WEIGHTS_PATH = "weights/best.pt"
 METRICS_DIR  = "metrics"
 
-# ── Weights loader: repo → upload fallback ────────────────────────────────────
+# ── Google Drive file ID ───────────────────────────────────────────────────────
+GDRIVE_FILE_ID = "1DLPl25HTro8rNo7QUDM9psKfeKT4yrOP"
+
+# ── Weights loader: Drive download → sidebar upload fallback ──────────────────
 @st.cache_resource(show_spinner=False)
 def ensure_weights(_uploaded_bytes: bytes | None = None) -> tuple[str, str | None]:
     """
-    Priority order:
-      1. weights/best.pt already on disk and valid  → use it
-      2. User uploaded the file via the sidebar      → save & use it
-    Returns (path, error_or_None).
+    Priority:
+      1. Already on disk and valid (cached from previous run)
+      2. Download from Google Drive automatically
+      3. User uploaded via sidebar
     """
+    import urllib.request, re as _re
+
     os.makedirs("weights", exist_ok=True)
 
     # 1 — already on disk and healthy
     if os.path.exists(WEIGHTS_PATH) and os.path.getsize(WEIGHTS_PATH) > 1_000_000:
         return WEIGHTS_PATH, None
 
-    # 2 — user supplied the file through the sidebar uploader
-    if _uploaded_bytes is not None:
-        with open(WEIGHTS_PATH, "wb") as f:
-            f.write(_uploaded_bytes)
-        size_mb = os.path.getsize(WEIGHTS_PATH) / 1e6
-        if size_mb > 1:
-            return WEIGHTS_PATH, None
-        else:
-            os.remove(WEIGHTS_PATH)
-            return WEIGHTS_PATH, "Uploaded file looks too small — are you sure it is best.pt?"
+    # 2 — download from Google Drive
+    try:
+        status = st.sidebar.info("⬇️ Downloading weights from Google Drive...")
 
-    return WEIGHTS_PATH, "weights/best.pt not found. Upload it via the sidebar."
+        session = urllib.request.build_opener()
+        url = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}"
+
+        # First request — may return a confirmation page for large files
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with session.open(req) as resp:
+            raw = resp.read()
+
+        # If Google returned a confirmation HTML page, extract confirm token
+        if b"confirm=" in raw and b"DOCTYPE" in raw[:500]:
+            match = _re.search(rb'confirm=([0-9A-Za-z_\-]+)', raw)
+            if match:
+                token = match.group(1).decode()
+                url = (f"https://drive.google.com/uc?export=download"
+                       f"&id={GDRIVE_FILE_ID}&confirm={token}")
+            else:
+                # Newer Drive uses a uuid-based confirm
+                match2 = _re.search(rb'uuid=([0-9A-Za-z_\-]+)', raw)
+                if match2:
+                    uuid = match2.group(1).decode()
+                    url = (f"https://drive.usercontent.google.com/download"
+                           f"?id={GDRIVE_FILE_ID}&export=download&confirm=t&uuid={uuid}")
+            req2 = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with session.open(req2) as resp2:
+                raw = resp2.read()
+
+        # Write to disk
+        with open(WEIGHTS_PATH, "wb") as f:
+            f.write(raw)
+
+        size_mb = os.path.getsize(WEIGHTS_PATH) / 1e6
+        if size_mb < 1:
+            os.remove(WEIGHTS_PATH)
+            raise ValueError(f"Downloaded file only {size_mb:.2f} MB — Drive link may need sign-in.")
+
+        status.success(f"✅ Weights ready ({size_mb:.1f} MB)")
+        return WEIGHTS_PATH, None
+
+    except Exception as e:
+        # 3 — fallback: user uploads via sidebar
+        if _uploaded_bytes is not None:
+            with open(WEIGHTS_PATH, "wb") as f:
+                f.write(_uploaded_bytes)
+            if os.path.getsize(WEIGHTS_PATH) > 1_000_000:
+                return WEIGHTS_PATH, None
+
+        return WEIGHTS_PATH, f"Auto-download failed: {e}. Please upload best.pt via the sidebar."
 
 
 # ── Model loader (cached) ─────────────────────────────────────────────────────
