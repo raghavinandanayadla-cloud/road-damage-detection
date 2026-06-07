@@ -1,0 +1,15 @@
+# Treat all model weights as binary - prevents CRLF corruption
+*.pt        binary
+*.pth       binary
+*.onnx      binary
+*.weights   binary
+*.bin       binary
+
+# Images - also binary
+*.jpg       binary
+*.jpeg      binary
+*.png       binary
+*.gif       binary
+
+# ZIP files
+*.zip       binary
