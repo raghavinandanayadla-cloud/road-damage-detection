@@ -62,12 +62,41 @@ SEV_COL      = {"High":"#ff4757","Medium":"#ffa502","Low":"#2ed573"}
 WEIGHTS_PATH = "weights/best.pt"
 METRICS_DIR  = "metrics"
 
+# ── Weights loader: repo → upload fallback ────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def ensure_weights(_uploaded_bytes: bytes | None = None) -> tuple[str, str | None]:
+    """
+    Priority order:
+      1. weights/best.pt already on disk and valid  → use it
+      2. User uploaded the file via the sidebar      → save & use it
+    Returns (path, error_or_None).
+    """
+    os.makedirs("weights", exist_ok=True)
+
+    # 1 — already on disk and healthy
+    if os.path.exists(WEIGHTS_PATH) and os.path.getsize(WEIGHTS_PATH) > 1_000_000:
+        return WEIGHTS_PATH, None
+
+    # 2 — user supplied the file through the sidebar uploader
+    if _uploaded_bytes is not None:
+        with open(WEIGHTS_PATH, "wb") as f:
+            f.write(_uploaded_bytes)
+        size_mb = os.path.getsize(WEIGHTS_PATH) / 1e6
+        if size_mb > 1:
+            return WEIGHTS_PATH, None
+        else:
+            os.remove(WEIGHTS_PATH)
+            return WEIGHTS_PATH, "Uploaded file looks too small — are you sure it is best.pt?"
+
+    return WEIGHTS_PATH, "weights/best.pt not found. Upload it via the sidebar."
+
+
 # ── Model loader (cached) ─────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_model(path):
+def load_model(_path):   # leading _ stops Streamlit hashing the path arg
     try:
         from ultralytics import YOLO
-        return YOLO(path), None
+        return YOLO(_path), None
     except Exception as e:
         return None, str(e)
 
@@ -290,10 +319,19 @@ with st.sidebar:
             unsafe_allow_html=True)
 
     st.markdown("---")
-    if os.path.exists(WEIGHTS_PATH):
-        st.success("✅ weights/best.pt found")
+    weights_on_disk = os.path.exists(WEIGHTS_PATH) and os.path.getsize(WEIGHTS_PATH) > 1_000_000
+    if weights_on_disk:
+        st.success("✅ weights/best.pt loaded")
+        uploaded_pt = None
     else:
-        st.error("❌ weights/best.pt not found\nPlace it at `weights/best.pt`")
+        st.warning("⚠️ weights/best.pt not in repo")
+        st.markdown("**Upload best.pt to continue:**")
+        uploaded_pt = st.file_uploader(
+            "best.pt", type=["pt"], label_visibility="collapsed",
+            help="Upload your trained YOLOv8s weights file"
+        )
+        if uploaded_pt:
+            st.success(f"✅ Received {uploaded_pt.size/1e6:.1f} MB")
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown('<h1 class="main-title">🚧 Road Damage Detection</h1>', unsafe_allow_html=True)
@@ -325,9 +363,15 @@ tab_detect, tab_curves, tab_plots, tab_batches, tab_about = st.tabs([
 with tab_detect:
     st.markdown('<div class="sec">Upload Road Image for Inference</div>', unsafe_allow_html=True)
 
-    model, model_err = load_model(WEIGHTS_PATH)
-    if model_err:
-        st.error(f"⚠️ Model load failed: {model_err}")
+    _pt_bytes = uploaded_pt.read() if (uploaded_pt is not None) else None
+    weights_path, dl_err = ensure_weights(_pt_bytes)
+    if dl_err:
+        st.error(f"⚠️ {dl_err}")
+        model, model_err = None, dl_err
+    else:
+        model, model_err = load_model(weights_path)
+        if model_err:
+            st.error(f"⚠️ Model load failed: {model_err}")
 
     uploaded = st.file_uploader("Drop a road image (JPG / PNG)",
                                 type=["jpg","jpeg","png"],
@@ -562,10 +606,8 @@ with tab_batches:
 # TAB 5 — ABOUT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_about:
-    ca, cb = st.columns([3, 2])
-    with ca:
-        st.markdown("""
-### Road Damage Detection — YOLOv8s
+    st.markdown("""
+### Road Damage Detection \u2014 YOLOv8s
 
 Fine-tuned on the [Road Damage Dataset (Kaggle)](https://www.kaggle.com/datasets/alvarobasily/road-damage)
 using Ultralytics YOLOv8s with augmentation and SGD.
@@ -574,21 +616,21 @@ using Ultralytics YOLOv8s with augmentation and SGD.
 
 | Class | Icon | Severity |
 |---|---|---|
-| Pothole | 🕳️ | 🔴 High |
-| Longitudinal Crack | ↕️ | 🟡 Medium |
-| Transverse Crack | ↔️ | 🟡 Medium |
-| Alligator Crack | 🐊 | 🔴 High |
+| Pothole | \U0001f573\ufe0f | \U0001f534 High |
+| Longitudinal Crack | \u2195\ufe0f | \U0001f7e1 Medium |
+| Transverse Crack | \u2194\ufe0f | \U0001f7e1 Medium |
+| Alligator Crack | \U0001f40a | \U0001f534 High |
 
 #### Training Configuration
 
 | Parameter | Value |
 |---|---|
 | Base Model | YOLOv8s |
-| Image Size | 640 × 640 |
+| Image Size | 640 \xd7 640 |
 | Epochs | 94 (resumed at 82) |
 | Batch Size | 8 |
 | Optimizer | SGD |
-| LR₀ / LRf | 0.001 / 0.01 |
+| LR\u2080 / LRf | 0.001 / 0.01 |
 | Momentum | 0.937 |
 | Weight Decay | 0.0005 |
 | Augmentation | RandAugment, Mosaic, Flip, HSV, Scale, Erase |
@@ -596,8 +638,8 @@ using Ultralytics YOLOv8s with augmentation and SGD.
 
 #### Training Resume
 The model was trained to epoch 81, then **resumed** from `last.pt`.
-The checkpoint loaded carried significantly better weights — mAP@0.5 jumped
-from ~0.61 at epoch 81 to ~0.87 at epoch 82, and stabilised around **0.84–0.87**
+The checkpoint loaded carried significantly better weights \u2014 mAP@0.5 jumped
+from ~0.61 at epoch 81 to ~0.87 at epoch 82, and stabilised around **0.84\u20130.87**
 for the remaining epochs.
 
 #### Final Metrics (epoch 94)
@@ -607,53 +649,4 @@ for the remaining epochs.
 | mAP@0.5:0.95 | 0.5089 |
 | Precision | 0.8218 |
 | Recall | 0.7846 |
-        """)
-
-    with cb:
-        st.markdown("#### 🏗️ Project Structure")
-        st.code("""\
-road_damage_app/
-├── app.py
-├── requirements.txt
-├── weights/
-│   └── best.pt          ← trained weights
-└── metrics/
-    ├── results.csv
-    ├── results.png
-    ├── confusion_matrix.png
-    ├── confusion_matrix_normalized.png
-    ├── BoxF1_curve.png
-    ├── BoxP_curve.png
-    ├── BoxR_curve.png
-    ├── BoxPR_curve.png
-    ├── labels.jpg
-    ├── train_batch0.jpg
-    ├── train_batch1.jpg
-    ├── train_batch2.jpg
-    ├── val_batch0_labels.jpg
-    ├── val_batch0_pred.jpg
-    ├── val_batch1_labels.jpg
-    ├── val_batch1_pred.jpg
-    ├── val_batch2_labels.jpg
-    └── val_batch2_pred.jpg
-""", language="")
-
-        st.markdown("#### 🚀 Run")
-        st.code("""\
-pip install -r requirements.txt
-streamlit run app.py
-""", language="bash")
-
-        st.markdown("#### 📦 Key Libraries")
-        for lib, desc in [
-            ("ultralytics","YOLOv8 engine"),
-            ("streamlit",  "Web interface"),
-            ("opencv",     "Image processing"),
-            ("plotly",     "Interactive charts"),
-            ("torch",      "Deep learning backend"),
-        ]:
-            st.markdown(
-                f'<div style="display:flex;justify-content:space-between;'
-                f'padding:3px 0;font-size:.84rem">'
-                f'<code>{lib}</code><span style="color:#8892b0">{desc}</span></div>',
-                unsafe_allow_html=True)
+    """)
