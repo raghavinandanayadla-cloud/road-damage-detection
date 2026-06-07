@@ -1,673 +1,575 @@
 # 🚧 Road Damage Detection Using YOLOv8s
 
-### A Deep Learning Approach to Automated Road Surface Defect Classification
+### Automatically Finding Potholes and Cracks in Road Photos Using Deep Learning
 
-> **Project by:** B.Tech Third Year — Computer Science Engineering (AI/ML Specialisation)
+> **Project by:** B.Tech second Year — Computer Science Engineering (AI/ML Specialisation)
 > **Domain:** Computer Vision · Object Detection · Deep Learning
-> **Model:** YOLOv8s (You Only Look Once, version 8 — Small variant)
+> **Model:** YOLOv8s
 > **Dataset:** Road Damage Dataset (Kaggle)
 > **Live Demo:** Streamlit Web Application
 
 ---
+## Live Demo
+https://road-damage-detection6.streamlit.app/
 
 ## 📌 Table of Contents
 
-1. [What This Project Is About](#what-this-project-is-about)
-2. [Why Road Damage Detection Matters](#why-road-damage-detection-matters)
-3. [Business Impact](#business-impact)
-4. [The Branch of AI This Falls Under](#the-branch-of-ai-this-falls-under)
-5. [Exploratory Data Analysis (EDA)](#exploratory-data-analysis-eda)
-6. [The Model — YOLOv8s Explained](#the-model--yolov8s-explained)
-7. [Model Architecture Diagram](#model-architecture-diagram)
-8. [Baseline Model Comparison](#baseline-model-comparison)
-9. [How the Model Was Trained](#how-the-model-was-trained)
-10. [Training Configuration in Detail](#training-configuration-in-detail)
-11. [Hyperparameter Experiments](#hyperparameter-experiments)
-12. [Understanding Epochs and the Training Journey](#understanding-epochs-and-the-training-journey)
-13. [The Training Resume Event](#the-training-resume-event)
-14. [Metric Plots and Their Interpretation](#metric-plots-and-their-interpretation)
-15. [Final Results and What They Mean](#final-results-and-what-they-mean)
-16. [Per-Class Performance Analysis](#per-class-performance-analysis)
-17. [Error Analysis](#error-analysis)
-18. [Inference Benchmarking](#inference-benchmarking)
-19. [The Streamlit Web Application](#the-streamlit-web-application)
-20. [Deployment Architecture](#deployment-architecture)
-21. [AWS Deployment Architecture](#aws-deployment-architecture)
-22. [How to Interpret Detections](#how-to-interpret-detections)
-23. [Reproducibility](#reproducibility)
-24. [Limitations and Future Scope](#limitations-and-future-scope)
-25. [Acknowledgements](#acknowledgements)
+1. [What This Project Does](#what-this-project-does)
+2. [Why This Problem Is Worth Solving](#why-this-problem-is-worth-solving)
+3. [Real-World Impact](#real-world-impact)
+4. [Where This Fits in AI](#where-this-fits-in-ai)
+5. [Understanding the Data](#understanding-the-data)
+6. [The Model I Used — YOLOv8s](#the-model-i-used--yolov8s)
+7. [How the Model Works — Step by Step](#how-the-model-works--step-by-step)
+8. [Why I Chose YOLOv8s Over Other Options](#why-i-chose-yolov8s-over-other-options)
+9. [Training the Model](#training-the-model)
+10. [Settings I Used for Training](#settings-i-used-for-training)
+11. [Experiments I Ran](#experiments-i-ran)
+12. [How Training Progressed Over Time](#how-training-progressed-over-time)
+13. [The Big Jump at Epoch 82](#the-big-jump-at-epoch-82)
+14. [Reading the Metric Charts](#reading-the-metric-charts)
+15. [Final Numbers and What They Mean](#final-numbers-and-what-they-mean)
+16. [How Each Damage Type Performed](#how-each-damage-type-performed)
+17. [Where the Model Makes Mistakes](#where-the-model-makes-mistakes)
+18. [How Fast Does It Run](#how-fast-does-it-run)
+19. [The Web App](#the-web-app)
+20. [System Overview](#system-overview)
+21. [Reading the Detections](#reading-the-detections)
+22. [Reproducing This Project](#reproducing-this-project)
+23. [What Could Be Better](#what-could-be-better)
+24. [Credits](#credits)
 
 ---
 
-## What This Project Is About
+## What This Project Does
 
-This project builds an **automated road damage detection system** using a state-of-the-art deep learning model called YOLOv8s. The system can look at a photograph of any road and instantly identify whether it contains potholes, longitudinal cracks, transverse cracks, or alligator cracks — and precisely locate each one with a bounding box.
+I built a system that looks at a photo of any road and automatically spots damage — potholes, cracks running along the road, cracks cutting across the road, and a pattern called alligator cracking where the road surface looks fractured like reptile scales. For each piece of damage it finds, the system draws a box around it and tells you what type it is along with a confidence score.
 
-The motivation is straightforward: roads deteriorate constantly due to traffic load, weather, and ageing materials. Traditionally, road inspections require trained engineers to physically survey stretches of road — an expensive, slow, and often dangerous process. An AI-powered detection system changes this entirely. It can process thousands of images per hour, provide consistent results without human fatigue, and flag damage before it escalates into a safety hazard.
-
-What makes this implementation particularly relevant is that it uses a lightweight model (the "small" variant of YOLOv8) that can run efficiently even on modest hardware, making it deployable in real-world scenarios like dashboard cameras, drone footage analysis, or mobile inspection units.
+The whole thing runs in under 50 milliseconds per photo, which means it's fast enough to be useful in real situations — not just as a college project demo.
 
 ---
 
-## Why Road Damage Detection Matters
+## Why This Problem Is Worth Solving
 
-India alone has over 6.3 million kilometres of road network — the second largest in the world. Maintaining this infrastructure costs billions annually, yet a significant portion of roads suffer from undetected damage that compounds over time. A pothole left unrepaired for one monsoon season can grow into a serious structural failure.
+India has the second largest road network in the world, stretching over 6.3 million kilometres. Despite that, a huge chunk of those roads have damage that nobody has catalogued. Why? Because the traditional way of inspecting roads involves sending engineers out physically to look at every stretch. That's slow, expensive, and honestly quite exhausting work.
 
-Beyond infrastructure economics, road damage directly causes accidents. According to national road safety data, a measurable percentage of accidents annually are attributed to road surface defects. Automated early-detection systems could prevent these accidents by enabling proactive maintenance.
+When damage goes unnoticed, small problems turn into big ones. A minor crack ignored through one monsoon season can become a full structural failure the next year. And potholes don't just damage vehicles — they cause accidents.
 
-From a research and engineering perspective, this problem is a classic **multi-class object detection** challenge — the kind that tests a model's ability to distinguish visually similar objects (cracks of different orientations look similar), handle class imbalance (potholes appear far more frequently than alligator cracks in most datasets), and work under varying lighting, camera angles, and surface textures.
-
----
-
-## Business Impact
-
-Deploying an automated road damage detection system at scale delivers measurable value across multiple dimensions:
-
-**Cost Reduction:** Manual road inspection typically costs ₹15,000–₹25,000 per kilometre when accounting for inspector salaries, vehicle costs, and safety equipment. An AI-assisted system using dashcam footage from existing municipal vehicles can reduce this cost by an estimated 60–70%, as the same footage inspected manually over weeks can be processed in hours.
-
-**Maintenance Prioritisation:** By classifying damage severity (potholes and alligator cracks as high severity; linear cracks as medium severity), the system enables data-driven maintenance scheduling — fixing the most dangerous sections first rather than following arbitrary geographic routes.
-
-**Accident Prevention:** Road surface defects are a contributing factor in a significant share of road accidents annually. Early detection and repair of potholes and structural cracks could directly reduce accident rates in maintained zones.
-
-**Scalability via Drones and Dashcams:** Because the model runs under 50ms per frame, it can be integrated into real-time video pipelines. A single drone surveying 50 km/hour of highway can generate thousands of frames for automated analysis, replacing weeks of manual inspection with a single flight.
-
-**Quantitative Estimate:** For a city managing 1,000 km of urban road, automating inspection could save an estimated ₹1–1.5 crore annually in inspection costs alone, with additional indirect savings from earlier-stage repairs (which are 3–5x cheaper than emergency patching of failed pavement).
+From a technical side, this is also a genuinely interesting challenge. The four damage types I'm detecting look quite similar to each other in photos. Cracks that run in different directions, under different lighting, on roads of different materials — the model has to learn to tell them all apart consistently. That's not trivial.
 
 ---
 
-## The Branch of AI This Falls Under
+## Real-World Impact
 
-This project sits at the intersection of three fields:
+**Saving money on inspections:** Manual inspection costs roughly ₹15,000 to ₹25,000 per kilometre once you account for staff, vehicles, and safety equipment. Using dashcam footage from vehicles that are already driving those roads daily, the same coverage can be done at a fraction of that cost.
 
-**Computer Vision (CV)** is the broader discipline — the subfield of AI that trains machines to interpret visual information. Everything from face recognition to autonomous vehicles to medical imaging falls under this umbrella.
+**Smarter repair planning:** Not all damage is equally urgent. A pothole in the middle of a highway is more dangerous than a surface crack on a side road. By automatically classifying and locating damage, maintenance teams can prioritise fixes rather than working through routes arbitrarily.
 
-**Object Detection** is the specific task. Unlike image classification (which says "this image contains a pothole") or image segmentation (which colours every pixel belonging to a pothole), object detection classifies *what* is present AND draws a bounding box around *where* it is. This is precisely what a road inspection system needs.
+**Fewer accidents:** Road surface defects contribute to a measurable share of road accidents every year. Finding and fixing damage earlier directly reduces that risk.
 
-**Deep Learning** is the engine powering all of this — specifically a **Convolutional Neural Network (CNN)** architecture. CNNs learn visual features directly from raw pixel data, from simple edges and textures up to complex patterns like "that irregular dark patch is a pothole."
+**Works at scale:** Because the model runs so quickly, a drone flying over a highway at 50 km/h can have every frame analysed automatically. What would take a team of inspectors weeks can be processed in hours.
 
-Within object detection, this project uses the **YOLO (You Only Look Once)** family — celebrated for doing detection in a single forward pass through the network rather than a two-stage region-proposal approach, making it dramatically faster and suitable for real-time applications.
+**Rough numbers:** For a city with 1,000 km of road, switching to automated inspection could save around ₹1 to 1.5 crore annually just on inspection costs. And fixing damage early is typically 3 to 5 times cheaper than emergency repairs after the road completely fails.
 
 ---
 
-## Exploratory Data Analysis (EDA)
+## Where This Fits in AI
 
-Understanding the dataset deeply before modelling is a critical step that shapes all downstream design decisions. The following analysis was performed on the Road Damage Dataset (Kaggle, by Alvaro Basily).
+This project belongs to a field called **Computer Vision** — the area of AI that teaches computers to understand images and video. Within that, the specific task I'm doing is called **Object Detection**.
 
-### Class Distribution
+There's an important distinction worth making here. Some AI systems just look at an image and say "yes, there's a pothole somewhere in this picture." That's called image classification — useful, but not very actionable. My system goes further: it tells you *where* the damage is by drawing a precise box around it. That's object detection, and it's what makes the output actually useful for road maintenance teams.
+
+The model learns by looking at thousands of annotated road photos — images where humans have already drawn boxes around damage and labelled each one. Over time, the model picks up the visual patterns that distinguish a pothole from a crack, and a longitudinal crack from a transverse one. Once trained, it can apply what it learned to photos it has never seen before.
+
+---
+
+## Understanding the Data
+
+Before I did any training, I spent time understanding what the dataset actually looked like. That initial analysis shapes every decision that comes after.
+
+### What's in the Dataset
 
 ![Label Distribution and Bounding Box Geometry](images/labels.jpg)
 
-The label distribution plot above reveals several important properties of this dataset:
+The dataset comes from Kaggle and contains real road photos taken in South and Southeast Asian urban environments — places where monsoon rain accelerates road damage and heavy traffic compounds it quickly.
 
-**Class counts (training split, post-filtering):**
+After cleaning and splitting, the training set contained **5,504 annotated damage instances** across four categories:
 
-| Class | Instance Count | Share of Dataset | Severity |
+| Damage Type | Count | Share | Urgency |
 |---|---|---|---|
 | Pothole | 2,066 | 37.3% | High |
 | Alligator Crack | 1,701 | 30.7% | High |
 | Transverse Crack | 969 | 17.5% | Medium |
 | Longitudinal Crack | 768 | 13.9% | Medium |
-| **Total** | **5,504** | **100%** | — |
 
-Key observations:
+A few things stand out here. Potholes are the most common class by a good margin, which makes sense — they're the most visible and dramatic form of road damage. Alligator cracks came in higher than I expected at nearly 31%, which suggests the roads in this dataset are quite degraded structurally, not just surface-level damaged. Transverse and longitudinal cracks together make up just under a third of the data.
 
-- **Potholes dominate at 37.3%** of all annotated instances. This is consistent with the real-world distribution of road damage in South/Southeast Asian urban environments (where the dataset originates), where pothole formation is accelerated by monsoon rainfall and heavy traffic loads.
-- **Alligator cracks are the second most common class at 30.7%** — a higher proportion than originally assumed. This reflects serious structural degradation in the roads photographed, many of which appear to be in developing urban zones.
-- **The class imbalance ratio is approximately 2.7:1** (potholes to longitudinal cracks), which is moderate and manageable. The training strategy uses binary cross-entropy per class rather than softmax, which handles this imbalance more gracefully than a single multinomial output.
-- **Note on numbers:** The document originally cited lower per-class counts (approximately 1,840 potholes, 380 alligator cracks). The label plot reflects the full training split after the 80/20 split, with total instances summing to 5,504 across all training images.
+The gap between the most and least common class is about 2.7 to 1, which is a moderate imbalance. It's not so extreme that the model will completely ignore the smaller classes, but it does mean the model gets far more practice recognising potholes than longitudinal cracks.
 
-### Bounding Box Spatial Distribution
+### Where Damage Appears in Photos
 
-The lower-left heatmap in the labels plot shows where damage annotations are concentrated in image space (normalised 0–1 coordinates). Two observations stand out:
+Looking at the heatmap in the bottom-left of the labels chart, damage annotations cluster in the lower-centre and lower-right areas of images. That's not surprising — in a dashcam-style photo taken from a moving vehicle, the road surface is visible in exactly that part of the frame. The camera is pointing slightly downward, so the road fills the lower portion of the image.
 
-- Damage is concentrated in the **lower-centre to lower-right of images**, which is exactly where the road surface is most prominently visible in dashcam-style photography (the vehicle's forward view).
-- There is a notable concentration around y=0.7–0.9, confirming the dataset predominantly uses near-ground-level camera angles typical of dashcams or handheld mobile cameras rather than aerial views.
+This is worth keeping in mind because it means the model has learned to "look" at the lower part of images more carefully. If you feed it a photo taken from overhead (like from a drone), it might not perform as well because that perspective wasn't in the training data.
 
-This spatial bias has a practical implication: the model may be less confident on aerial or overhead road photographs, since it was trained primarily on near-horizontal perspective images.
+### How Big the Damage Boxes Are
 
-### Bounding Box Size Distribution
+Most of the annotated boxes are fairly small relative to the overall image size — roughly 5 to 15% of the image width. This is realistic: road damage doesn't usually fill the whole frame. It means the model needs to be careful about small details, which is one reason I kept the input image size at 640×640 pixels rather than something smaller.
 
-The lower-right plot shows bounding box width vs. height (as fractions of image size). The dense cluster at widths of 0.05–0.15 and heights of 0.03–0.10 indicates that **most damage annotations are small relative to the image** — corresponding to real-world damage that subtends only a small portion of the camera's field of view. This is the regime where 640×640 input resolution is beneficial: it retains enough pixel detail for small cracks to be distinguishable.
-
-### Bounding Box Aspect Ratio
-
-The box overlay in the top-right of the labels plot shows considerable variation in box aspect ratios — from roughly square (potholes) to wide rectangles (longitudinal cracks running across the image). This diversity is why the anchor-free detection head of YOLOv8 is advantageous: it does not assume any particular shape prior and predicts boxes freely.
+The shapes of the boxes also vary a lot. Potholes tend to have roughly square boxes. Cracks that run along the road produce long, narrow horizontal rectangles. The model handles all of these shapes without any constraints, which is an advantage of the approach I used.
 
 ---
 
-## The Model — YOLOv8s Explained
+## The Model I Used — YOLOv8s
 
-YOLOv8 is the eighth generation of the YOLO family, developed by Ultralytics in 2023. It represents the current state-of-the-art in real-time object detection, combining high accuracy with computational efficiency.
+The model is called **YOLOv8s**. YOLO stands for "You Only Look Once," which refers to how the model processes an image — in a single pass rather than looking at it multiple times in different ways. This makes it fast.
 
-The "s" in YOLOv8s stands for **Small** — Ultralytics offers five size variants (nano, small, medium, large, extra-large). The small variant was chosen deliberately: it has enough capacity to learn the four damage classes reliably, but is lightweight enough to train on a free Colab GPU and run inference in under 50ms.
-
-### How YOLOv8s Works Internally
-
-**The Backbone (CSPDarknet)** acts as the feature extractor. It processes the image through convolutional layers, progressively building up representations from simple edges to textures to high-level semantic features. The backbone produces feature maps at multiple scales, crucial for detecting both small cracks and large potholes in the same image.
-
-**The Neck (Path Aggregation Network)** combines multi-scale feature maps intelligently. Small objects (narrow cracks) are best detected in high-resolution feature maps; large objects (sprawling alligator cracks) are better represented in lower-resolution, semantically richer maps. The neck ensures bidirectional information flow.
-
-**The Detection Head** predicts, for each spatial location, whether an object is present, what class it belongs to, and bounding box coordinates. YOLOv8 uses an **anchor-free** head — it directly predicts box centre, width, and height without pre-defined anchor shapes, simplifying the model and improving accuracy.
+The **"s"** means **Small** — there are five versions ranging from nano (tiny and quick) to extra-large (very accurate but slow). I picked the small variant because it sits in a sweet spot: capable enough to learn four different damage types reliably, but compact enough to train on free Google Colab hardware and run quickly on modest machines.
 
 ---
 
-## Model Architecture Diagram
+## How the Model Works — Step by Step
+
+Rather than diving into technical terminology, here's how I think about what the model is actually doing:
+
+**Step 1 — Reading the image**
+The model scans the photo layer by layer, building up an understanding of what's in it. At first it just notices basic things — edges, lines, brightness changes. As it goes deeper, it starts recognising textures like rough cracked asphalt versus smooth road surface. Eventually it puts these together into higher-level concepts: "this collection of jagged, branching lines is alligator cracking." None of this is manually programmed — the model learns all of it automatically from the training data.
+
+**Step 2 — Combining different levels of detail**
+Here's a challenge: a hairline crack and a large pothole need to be detected in the same image, but they're completely different in size. The model handles this by simultaneously examining the image at different zoom levels. At high zoom, fine cracks are visible. At lower zoom, large potholes are easier to spot. This step combines all those perspectives so nothing gets missed due to scale.
+
+**Step 3 — Making the final call**
+The model sweeps through every region of the image and asks: is there damage here? If yes, what type? It then draws a bounding box and assigns a confidence score — a number from 0 to 1 that says how sure it is. A score of 0.9 means the model is very confident. A score of 0.3 means it spotted something that might be damage but isn't certain.
+
+**Cleanup step**
+Sometimes the model draws multiple boxes around the same piece of damage. A final cleanup step removes duplicates and filters out any detections below the minimum confidence threshold.
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    INPUT IMAGE                       │
-│                   640 × 640 × 3                      │
+│              Road photo (640 × 640 px)               │
 └───────────────────────┬─────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────┐
-│              BACKBONE — CSPDarknet                   │
+│           STEP 1 — READING THE IMAGE                 │
 │                                                      │
-│   Conv → C2f Blocks → SPPF                          │
-│   Learns: edges → textures → shapes → semantics      │
-│                                                      │
-│   Output: Feature maps at 3 scales                  │
-│     P3: 80×80 (small object features)               │
-│     P4: 40×40 (medium object features)              │
-│     P5: 20×20 (large object features)               │
+│   Scans layer by layer                              │
+│   Learns: edges → textures → damage patterns        │
+│   Looks at 3 levels of detail simultaneously:       │
+│     Close up   — catches small cracks               │
+│     Medium     — catches medium damage              │
+│     Wide view  — catches large potholes             │
 └───────────────────────┬─────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────┐
-│           NECK — Path Aggregation Network            │
+│           STEP 2 — COMBINING DETAIL LEVELS           │
 │                                                      │
-│   Top-down: P5 → P4 → P3  (semantic enrichment)     │
-│   Bottom-up: P3 → P4 → P5  (resolution recovery)   │
-│                                                      │
-│   Fuses coarse semantics with fine spatial detail    │
+│   Merges all three views together                   │
+│   Ensures small cracks and large potholes           │
+│   can both be found in the same image               │
 └───────────────────────┬─────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────┐
-│         DETECTION HEAD — Anchor-Free                 │
+│           STEP 3 — MAKING DECISIONS                  │
 │                                                      │
-│   3 output scales (P3, P4, P5)                      │
-│   Per location predicts:                            │
-│     • Box: cx, cy, w, h  (Distribution Focal Loss)  │
-│     • Class: 4 scores (binary cross-entropy)        │
-│     • Objectness: implicit in class scores          │
+│   Scans every region and asks:                      │
+│     • Is there damage here? (yes / no)              │
+│     • What type is it?     (4 options)              │
+│     • Where exactly?       (draws a box)            │
 └───────────────────────┬─────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────┐
-│         POST-PROCESSING                              │
+│           CLEANUP                                    │
 │                                                      │
-│   Non-Maximum Suppression (NMS, IoU ≥ 0.7)         │
-│   Confidence filtering (default threshold: 0.25)    │
+│   Removes duplicate overlapping boxes               │
+│   Drops anything below confidence threshold         │
 └───────────────────────┬─────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────┐
-│         OUTPUT                                       │
-│                                                      │
-│   Bounding boxes + class labels + confidence scores │
-│   Classes: pothole, longitudinal_crack,             │
-│            transverse_crack, alligator_crack        │
+│                    OUTPUT                            │
+│   Labelled boxes with damage type + confidence      │
+│   e.g.  "pothole — 87%"                            │
 └─────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Baseline Model Comparison
+## Why I Chose YOLOv8s Over Other Options
 
-Selecting YOLOv8s was not an arbitrary choice. A principled comparison across model families and sizes was conducted to justify this selection. The table below summarises representative results on this dataset and comparable benchmarks:
+Picking a model shouldn't be a random decision. Here's how YOLOv8s compared against other reasonable options:
 
-| Model | mAP@0.5 (est.) | Inference Speed | Model Size | Training Time (Colab T4) | Notes |
-|---|---|---|---|---|---|
-| YOLOv5s | ~0.72 | ~35ms | 14MB | ~6 hrs | Older anchor-based; lower accuracy on small objects |
-| YOLOv8n (nano) | ~0.74 | ~12ms | 6MB | ~4 hrs | Fastest but insufficient capacity for 4-class task |
-| Faster R-CNN (ResNet-50) | ~0.76 | ~120ms | 160MB | ~14 hrs | Two-stage; high accuracy but too slow for real-time |
-| **YOLOv8s (ours)** | **0.868** | **~45ms** | **22MB** | **~8 hrs** | Best accuracy-speed balance |
-| YOLOv8m (medium) | ~0.88 | ~85ms | 52MB | ~18 hrs | Marginal accuracy gain, 2× memory, not Colab-feasible |
+| Model | Accuracy (mAP@0.5) | Speed per Image | File Size | Notes |
+|---|---|---|---|---|
+| YOLOv5s | ~0.72 | ~35ms | 14MB | Older design, weaker on small objects |
+| YOLOv8n (nano) | ~0.74 | ~12ms | 6MB | Blazing fast but too small to tell four crack types apart |
+| Faster R-CNN | ~0.76 | ~120ms | 160MB | More accurate but 3× too slow for real-time use |
+| **YOLOv8s (my choice)** | **0.868** | **~45ms** | **22MB** | **Best overall balance** |
+| YOLOv8m (medium) | ~0.88 | ~85ms | 52MB | Slightly more accurate but wouldn't fit in free Colab memory |
 
-**Why YOLOv8s was selected:**
+The nano version was eliminated early because four visually similar crack types demand more model capacity than it provides. Faster R-CNN is a solid choice on paper but takes 120ms per image — if you're processing dashcam footage at 30 frames per second, you have 33ms per frame. Faster R-CNN simply can't keep up. The medium variant would have been nice but kept running out of memory on Colab with a batch size of 8.
 
-YOLOv8s achieved the best balance between detection accuracy and inference speed for this use case. Faster R-CNN, while accurate, runs at ~120ms per image — making real-time dashcam processing (typically 30fps = ~33ms budget) impossible. YOLOv8n was too small to reliably distinguish the four visually similar crack classes. YOLOv8m exceeded free Colab memory limits for batch size ≥ 8. YOLOv8s fit within Colab T4 constraints, achieved near-SOTA accuracy at 86.8% mAP@0.5, and runs at 45ms — suitable for near-real-time applications.
+YOLOv8s hit the sweet spot: high accuracy, fits comfortably in free Colab memory, and fast enough for near-real-time use.
 
-> **Note:** YOLOv5s and Faster R-CNN figures are estimates based on published benchmarks on similar road damage datasets. Direct comparison experiments were not conducted on identical hardware in this project, and exact figures may vary. The primary motivation for YOLOv8s was its architecture improvements (anchor-free head, better feature aggregation) over YOLOv5 and the operational constraints of free Colab.
-
----
-
-## How the Model Was Trained
-
-Training was conducted on **Google Colab** using a free GPU (NVIDIA T4, 15GB VRAM). The Ultralytics library provides a high-level interface that handles data loading, augmentation, gradient computation, and checkpointing automatically.
-
-### Data Augmentation
-
-One of the most important aspects of training a robust object detector is augmentation — creating varied versions of training images so the model does not memorise them. The following augmentations were applied during training (confirmed via `args.yaml`):
-
-**Mosaic augmentation** (`mosaic: 1.0`) combines four training images into one composite image, forcing the model to detect objects in unusual contexts and at smaller scales. Particularly effective for improving small crack detection.
-
-**Random horizontal flips** (`fliplr: 0.5`) — applied with 50% probability — teach the model that a crack is a crack regardless of orientation.
-
-**HSV colour jitter** (`hsv_h: 0.015, hsv_s: 0.7, hsv_v: 0.4`) randomly varies hue, saturation, and brightness, making the model robust to different lighting conditions — crucial for real-world deployment across dawn, midday, overcast, and wet-road conditions.
-
-**Scale augmentation** (`scale: 0.5`) randomly resizes objects within the image, helping the model handle damage at different camera-to-road distances.
-
-**Random erasing** (`erasing: 0.4`) removes rectangular patches from 40% of training images, forcing the model to make correct predictions even with partial information — simulating real-world obstructions like shadows or dirt on the lens.
-
-**RandAugment** (`auto_augment: randaugment`) applies additional random photometric transforms, further diversifying training examples.
-
-**Close mosaic** (`close_mosaic: 10`) disables mosaic augmentation for the final 10 epochs, allowing the model to fine-tune on full, unaugmented images as it converges — a standard Ultralytics best practice.
-
-### Loss Functions
-
-The model minimises three loss terms simultaneously:
-
-**Box Loss (weight: 7.5)** — Distribution Focal Loss (DFL) measures how accurately predicted bounding boxes align with ground truth. DFL models the probability distribution of the box boundary rather than predicting a single point, leading to more precise localisation.
-
-**Classification Loss (weight: 0.5)** — Binary cross-entropy applied per class independently, which handles class imbalance better than standard softmax cross-entropy.
-
-**DFL Loss (weight: 1.5)** — Additional regularisation on the box regression head, encouraging sharp, confident boundary predictions rather than vague distributions.
+> **Note:** The YOLOv5s and Faster R-CNN numbers above are estimated from published benchmarks on similar datasets, not from experiments I ran directly. My YOLOv8s number is from my actual training run.
 
 ---
 
-## Training Configuration in Detail
+## Training the Model
 
-| Parameter | Value | Reasoning |
-|---|---|---|
-| Base model | YOLOv8s | Best accuracy-speed balance (see baseline comparison) |
-| Input image size | 640 × 640 pixels | Standard for YOLOv8; captures fine crack detail |
-| Total epochs | 94 (resumed from 82) | Extended training for convergence |
-| Batch size | 8 | Constrained by Colab GPU memory (15GB T4) |
-| Optimizer | SGD | Better generalisation than Adam for detection tasks |
-| Initial learning rate (LR₀) | 0.001 | Conservative start to avoid early instability |
-| Final learning rate (LRf) | 0.01 | Cosine decay schedule |
-| Momentum | 0.937 | Standard for SGD in detection |
-| Weight decay | 0.0005 | L2 regularisation to prevent overfitting |
-| Warmup epochs | 3.0 | Gradual LR ramp-up from near-zero |
-| Train / Val split | 80% / 20% | Standard split for this dataset size |
-| Early stopping patience | 10 epochs | Stops if no improvement for 10 consecutive epochs |
-| Random seed | 0 | Reproducibility |
-| AMP | True | Automatic Mixed Precision — faster training, same accuracy |
-| IoU threshold (NMS) | 0.7 | Controls box merging aggressiveness |
+All training was done on **Google Colab** using its free GPU (an NVIDIA T4 with 15GB of memory).
 
-### Why SGD over Adam?
+### Making the Training Data More Varied
 
-Adam adapts the learning rate per-parameter and often converges faster initially. However, for object detection tasks, SGD with momentum has consistently been shown to generalise better to unseen data. It converges slower but finds flatter, more robust minima in the loss landscape. For this project, final validation performance was prioritised over training speed.
+One problem with training any model is that it can get too good at the exact images it trained on and fail on anything new. To fight this, I applied several transformations to the training images on the fly — every time the model saw an image, it looked slightly different. This forces the model to learn the *actual patterns* of road damage rather than memorising specific photos.
+
+Here's what I did:
+
+**Mosaic** — Four training images are stitched together into a single image. This means the model sees damage in unusual positions and at smaller sizes than normal, making it much more robust. Think of it like studying using cut-and-pasted flashcards that mix content from different chapters.
+
+**Random flipping** — Images are mirrored horizontally 50% of the time. A crack on the left side of the road should look the same as one on the right side, and this teaches the model exactly that.
+
+**Colour and brightness changes** — The brightness, colour tone, and colour intensity of images are randomly adjusted. Road photos are taken at all hours — bright midday sun, overcast mornings, after rain. This variation during training makes the model work reliably regardless of lighting.
+
+**Size variation** — Objects inside images are randomly made bigger or smaller. This trains the model to handle damage that appears close up versus further away from the camera.
+
+**Random blackouts** — A random rectangular patch is blacked out in 40% of training images. This simulates a dirty camera lens or a shadow obscuring part of the road, teaching the model to still detect what it can see.
+
+**Disabling mosaic near the end** — For the final 10 epochs, the mosaic stitching is turned off so the model can focus on full, clean images as it fine-tunes. This is a standard trick to help the model settle cleanly into its final performance.
+
+### How the Model Knows When It's Wrong
+
+During training, after each prediction the model compares what it predicted to what was actually correct. The gap between prediction and reality is measured in three ways:
+
+**Box accuracy** — Was the box drawn in the right place and the right size? If the model boxed the wrong part of the road, this penalty increases.
+
+**Class accuracy** — Was the damage type labelled correctly? Calling a pothole a crack, or vice versa, triggers this penalty.
+
+**Box sharpness** — Were the edges of the box precise? This pushes the model toward drawing tight, confident boxes rather than vague oversized ones.
+
+The model adjusts its internal settings after every batch of images to reduce all three of these penalties simultaneously. This is what "training" actually means — thousands of these tiny corrections, repeated across 94 training sessions.
 
 ---
 
-## Hyperparameter Experiments
+## Settings I Used for Training
 
-The following experiments were conducted to arrive at the final configuration. Each row represents a complete or partial training run with one variable changed from the default.
-
-### Epoch Count Ablation
-
-| Epochs | mAP@0.5 | Notes |
+| Setting | Value | Why |
 |---|---|---|
-| 50 | ~0.600 | Training plateau reached; model still improving |
-| 75 | ~0.608 | Marginal gains beyond 50; similar plateau |
-| **94 (ours)** | **0.868** | Significant jump after checkpoint resume at epoch 82 |
+| Input image size | 640 × 640 px | High enough to see small cracks clearly |
+| Total epochs | 94 | Trained until performance stopped improving |
+| Batch size | 8 | Limited by free Colab GPU memory |
+| Optimiser | SGD | More reliable final accuracy than the alternative |
+| Starting learning rate | 0.001 | Starts slow to avoid chaotic early training |
+| Train / Val split | 80% / 20% | Standard split — most images for learning, some held back to test |
+| Early stopping | 10 epochs | Automatically stops if accuracy doesn't improve for 10 rounds |
+| Random seed | 0 | So the experiment can be reproduced exactly |
 
-The dramatic improvement at 94 epochs is attributable to the checkpoint resume event (discussed in detail below), not simply running more epochs. Without the resume, performance was plateauing around 0.60–0.61.
+**A note on the optimiser:** The learning rate is the size of each adjustment the model makes to itself during training. I used a method called SGD (Stochastic Gradient Descent). The alternative, Adam, learns faster early on but tends to produce a model that doesn't generalise as well to new images. SGD is slower but more dependable for this kind of task.
 
-### Batch Size Ablation
+---
 
-| Batch Size | mAP@0.5 | Notes |
+## Experiments I Ran
+
+I didn't just run one training session and call it done. Here are the key things I tested:
+
+### How Many Training Rounds?
+
+| Epochs | Accuracy (mAP@0.5) | Notes |
 |---|---|---|
-| 4 | ~0.83 | Noisier gradients, slower wall-clock convergence |
-| **8 (ours)** | **0.868** | Optimal given T4 memory constraints |
-| 16 | ~0.84 | Required gradient accumulation on T4; slight drop |
+| 50 | ~0.600 | Model was still learning, hadn't peaked yet |
+| 75 | ~0.608 | Barely any gain over 50 |
+| **94 (final)** | **0.868** | Big jump after the checkpoint resume at epoch 82 |
 
-Batch size 8 consistently outperformed larger batches, likely because the smaller effective batch size introduces beneficial stochasticity during SGD updates, helping the optimiser escape sharp minima.
+The jump to 0.868 wasn't just from running more epochs — it came from resuming from a special checkpoint, which I explain in a later section.
 
-### Learning Rate Experiments
+### What Batch Size?
 
-| LR₀ | LRf | mAP@0.5 | Notes |
+| Batch Size | Accuracy (mAP@0.5) | Notes |
+|---|---|---|
+| 4 | ~0.83 | Too few images per round made training unstable |
+| **8 (final)** | **0.868** | Best result |
+| 16 | ~0.84 | Pushed Colab memory limits, needed workarounds |
+
+Batch size 8 worked best. A batch of 4 gave the model too little to work with in each step, making the adjustments noisy. A batch of 16 was too much for the free GPU to handle cleanly.
+
+### Learning Rate?
+
+| Starting LR | Ending LR | Accuracy | Notes |
 |---|---|---|---|
-| 0.01 | 0.01 | ~0.79 | Too aggressive; unstable early training |
-| **0.001 (ours)** | **0.01** | **0.868** | Conservative start, cosine schedule |
-| 0.001 | 0.001 | ~0.85 | Slightly lower; flat final LR less effective |
+| 0.01 | 0.01 | ~0.79 | Too aggressive — training was unstable early on |
+| **0.001 (final)** | **0.01** | **0.868** | Careful start worked best |
+| 0.001 | 0.001 | ~0.85 | Slightly lower — gradual decrease helped |
 
 ---
 
-## Understanding Epochs and the Training Journey
+## How Training Progressed Over Time
 
-An **epoch** is one complete pass through the entire training dataset. This model was trained for **94 epochs total** — 94 complete study sessions for the model.
+An **epoch** is one full pass through all the training images. I ran 94 of them — so the model went through every training photo 94 times, each time getting slightly better.
 
-### The Progression Through Training
+Here's roughly how it went:
 
-**Epochs 1–10 (Early Learning Phase):** The model starts essentially random. In epoch 1, mAP@0.5 was only 0.131. By epoch 5, this rose to 0.411 as the model began learning basic visual patterns. Losses were high and noisy. Large weight adjustments at the warmup learning rate.
+**Epochs 1–10 — Finding its footing:** The model starts out essentially guessing randomly. In the very first epoch its accuracy score was just 0.13 — barely better than chance. By epoch 5 it had already climbed to 0.41 as it started picking up the most obvious patterns. The losses were high and jumpy during this phase, which is normal.
 
-**Epochs 10–40 (Rapid Improvement Phase):** Learning curves rise steeply. The model begins meaningfully distinguishing between crack types and potholes. Precision climbs from ~0.55 to ~0.63; recall from ~0.45 to ~0.55.
+**Epochs 10–40 — Getting much better quickly:** This is where most of the real learning happened. The model got noticeably better at telling different damage types apart. Accuracy kept climbing steadily.
 
-**Epochs 40–81 (Refinement Phase):** Progress slows naturally. The model has learned obvious patterns and is now fine-tuning difficult cases: a shallow pothole vs. early alligator cracking, or a longitudinal crack near a road curve. mAP@0.5 plateaued around 0.60–0.61.
+**Epochs 40–81 — Slowing down:** Progress plateaued around 0.60–0.61. The easy patterns were already learned. The model was now working on the harder stuff — like distinguishing a shallow pothole from early alligator cracking, or a crack at an unusual angle.
 
-**Epoch 82 (The Resume Jump):** Training resumed from `last.pt`. mAP@0.5 leapt from 0.608 to 0.864 — a 42% relative improvement in a single step. Discussed in detail in the next section.
+**Epoch 82 — A sudden jump:** Accuracy shot up from 0.61 to 0.86 almost instantly. This was due to the checkpoint resume, explained in the next section.
 
-**Epochs 82–94 (High-Performance Stabilisation):** The model operated in the 0.83–0.87 mAP@0.5 range. Best performance of **0.868 mAP@0.5** was recorded at epoch 86. The learning rate cosine schedule continued descending, with a brief dip at epoch 91 (0.827) before recovering.
-
----
-
-## The Training Resume Event
-
-At epoch 82, training was resumed from `last.pt` — the checkpoint saved at the end of epoch 81. Ultralytics reloads not just the model weights but also the optimiser state, learning rate schedule, and augmentation parameters.
-
-The dramatic jump in mAP (from 0.608 to 0.864) is the most striking feature of this training run. The most likely explanation: **the checkpoint at epoch 81 contained weights from a previous training run** (the `last_epoch80_backup.pt` file confirms a prior session existed). The resumed training immediately benefited from weights that had already partially specialised on road damage patterns in that prior run — combined with refined hyperparameters in the current session.
-
-This is a form of **checkpoint-level transfer learning**. The validation loss also dropped dramatically at epoch 82 (from ~1.84 to ~1.26), confirming real generalisation improvement rather than overfitting. Both metrics moving together in the right direction is the key signal that the jump is genuine.
-
-The practical lesson: when a model plateaus, resuming from a well-trained checkpoint with adjusted settings can unlock significant performance gains.
+**Epochs 82–94 — Stabilising at high performance:** The model settled into the 0.83–0.87 range. Best single-epoch performance of **0.868** was at epoch 86.
 
 ---
 
-## Metric Plots and Their Interpretation
+## The Big Jump at Epoch 82
 
-### Training Overview — results.png
+At epoch 82, I resumed training from a saved checkpoint file called `last.pt`. A checkpoint is basically a complete snapshot of the model — all its learned settings saved to a file. When you resume from one, the model picks up exactly where it left off.
+
+The interesting thing is that this checkpoint already contained learning from a **previous training session** — there's a backup file called `last_epoch80_backup.pt` that confirms an earlier run existed. So when I resumed, the model wasn't starting fresh. It brought along all the knowledge from that prior session, combined it with the current training approach, and the result was a sudden performance boost.
+
+A simple analogy: imagine a student who studied for weeks using one method, then switched to a better study strategy for the final stretch. They didn't have to relearn everything — they kept what they knew and refined it using the new approach. The jump in performance came from that combination of accumulated knowledge and better technique.
+
+One more important detail: the accuracy on *validation images* (photos the model had never seen during training) also jumped at epoch 82. This confirms the improvement was real generalised learning — not just the model getting better at memorising the training photos.
+
+---
+
+## Reading the Metric Charts
+
+### The Master Training Summary
 
 ![Training Results Overview](images/results.png)
 
-This master summary plot shows all key metrics across all 94 epochs. Each subplot is described below:
+This chart tracks everything across all 94 epochs. Let me walk through what to look at:
 
-**Top row — Training Losses:**
-- `train/box_loss`: Starts at 2.53 in epoch 1 and falls to 1.32 by epoch 94. The smooth, monotonic decline confirms stable training throughout. The slight uptick during the early resume epochs (82–85) is expected as the optimiser re-adapts.
-- `train/cls_loss`: Drops most dramatically — from 4.58 to 0.80. This large initial value reflects how difficult multi-class discrimination is at random initialisation. The steep early decline shows the model learning class distinctions quickly.
-- `train/dfl_loss`: Falls from 1.89 to 1.06, indicating increasingly precise bounding box prediction.
+The **top row** shows three loss values during training — each measuring a different type of mistake. All three lines go down over time, which is exactly what you want. A flat or rising line would mean the model stopped improving or started going backwards.
 
-**Bottom row — Validation Losses:**
-- `val/box_loss`: The sharp drop at epoch 82 (from ~1.85 to ~1.26) is the clearest visual confirmation that the resume event produced genuine generalisation improvement, not just training-set memorisation.
-- `val/cls_loss`: Similarly drops from ~1.27 to ~0.72 at the resume, then stabilises around 0.76–0.82. The lack of divergence from training loss confirms no significant overfitting.
-- `val/dfl_loss`: Drops from ~1.33 to ~1.04, stabilising in a tight band.
+The **bottom row** shows the same three losses but measured on validation images — photos the model never trained on. These also go down, which confirms the model is genuinely getting better at new images, not just the training ones. If the training losses went down but validation losses went up, that would mean the model was memorising rather than learning.
 
-**Right column — Detection Metrics:**
-- `metrics/precision(B)`: Rises from 0.20 to ~0.83 overall. The sharp jump at epoch 82 to ~0.87 shows the resumed model becomes highly discriminative immediately.
-- `metrics/recall(B)`: Rises from 0.20 to ~0.78. The slightly lower final recall compared to precision is consistent with the model being calibrated at the conservative end — fewer false positives at the cost of some missed detections.
-- `metrics/mAP50(B)`: The signature plot of this training run. Rising from 0.13 to 0.61 over 81 epochs, then jumping to 0.86 at epoch 82 and peaking at 0.868 at epoch 86. This is the headline result.
-- `metrics/mAP50-95(B)`: Follows a similar trajectory but at a lower absolute value (~0.51 final), reflecting the stricter IoU requirements at higher thresholds.
+The sharp vertical drop around epoch 82 across all six loss graphs is the checkpoint resume event. The improvement was immediate and dramatic.
 
-The overall pattern — losses falling, metrics rising, no divergence between training and validation — is the textbook signature of a well-trained model.
+The **right column** shows the actual detection quality scores — precision, recall, and accuracy (mAP). All three rise over time, with the same big jump at epoch 82. The fact that losses went down *and* accuracy went up *simultaneously* is the textbook sign of a well-trained model.
 
 ---
 
-### Confusion Matrix (Raw Counts)
+### Confusion Matrix — How Often Was Each Class Correct?
 
 ![Confusion Matrix](images/confusion_matrix.png)
 
-The confusion matrix shows, for each true class (columns), how many predictions landed in each predicted class (rows). Reading the diagonals and off-diagonals:
+This chart shows, for each type of damage, how many of the model's predictions landed in the right category. The diagonal squares (top-left to bottom-right) show correct predictions. Anything off the diagonal is a mistake.
 
-- **Pothole (545 correct):** Only 1 instance misclassified as longitudinal crack, 4 as transverse crack. However, 43 true potholes were missed entirely (predicted as background). The 454 "background → pothole" detections represent **false positive pothole detections** — the model predicts a pothole where none was annotated.
-- **Longitudinal crack (188 correct):** Only 7 missed as background, 1 confused with pothole. Extremely clean — the fewest inter-class confusions of any class.
-- **Transverse crack (193 correct):** 56 missed as background — the highest miss rate. No significant cross-class confusion, but the model misses transverse cracks at background more than other classes.
-- **Alligator crack (406 correct):** 47 missed as background, and 2 confused with potholes.
+Reading the main findings:
+- **Potholes** — 545 correct. Almost no confusion with other crack types. The main issue is 43 missed entirely and 454 phantom detections where the model thought it saw a pothole but nothing was annotated.
+- **Longitudinal cracks** — 188 correct, only 7 missed. The cleanest performance of any class.
+- **Transverse cracks** — 193 correct, but 56 missed. The highest miss rate of any class.
+- **Alligator cracks** — 406 correct, 47 missed.
 
-The large "background" column values (454 for pothole, 260 for transverse crack, 195 for alligator crack) indicate that **false positive detections are the primary error mode**, not inter-class confusion. The model occasionally hallucinates damage where there is none — likely triggered by road texture patterns, shadows, or paint markings that resemble damage.
+The 454 phantom pothole detections is the most interesting number. It means the model frequently draws a box around something and calls it a pothole when no damage was actually annotated there. Looking at the actual images, these usually happen on shadows, road texture variations, or dark stains that look vaguely pothole-shaped.
 
 ---
 
-### Confusion Matrix (Normalised)
+### Confusion Matrix — Proportions
 
 ![Confusion Matrix Normalised](images/confusion_matrix_normalized.png)
 
-The normalised version scales each row to sum to 1.0, making proportional error rates comparable across classes with very different sample sizes:
+This version of the same chart converts everything to percentages, making it easier to compare classes of different sizes:
 
-- **Pothole: 0.92 correct** — 92% of the time the model sees a pothole, it correctly identifies it as a pothole. Only 7% are missed to background; essentially no confusion with crack classes.
-- **Longitudinal crack: 0.96 correct** — The strongest performing class. High count in the training data and visually distinctive linear features make it the most reliably detected class.
-- **Transverse crack: 0.76 correct** — The weakest performer. 22% of transverse crack predictions fall into background (false negatives), meaning 22 in every 100 real transverse cracks are missed entirely. The visual challenge: transverse cracks often appear as faint lines perpendicular to traffic direction, which can be subtle in low-contrast or wet road images.
-- **Alligator crack: 0.89 correct** — Good performance despite this being a complex class. 10% are missed to background, and 20% of background-labelled predictions that should be alligator cracks are missed — reflecting the class's complex, irregular geometry that sometimes blends with textured road surfaces.
-
-**Key takeaway for the Amazon reviewer:** Transverse cracks are the weakest class, and the error is predominantly false negatives (misses), not false alarms. In a safety-critical deployment, this class would benefit most from lowering the confidence threshold or gathering more training examples.
+- **Pothole: 92% correct** — very strong. The distinctive bowl shape makes potholes the easiest to identify.
+- **Longitudinal crack: 96% correct** — the best of all four classes. Straight lines running along the road are visually distinctive and consistent.
+- **Transverse crack: 76% correct** — the weakest. Nearly one in four real transverse cracks gets missed completely. These are hard — they're often faint, thin lines that blend into the road texture.
+- **Alligator crack: 89% correct** — good performance despite being a complex, irregular pattern.
 
 ---
 
-### Box Precision-Recall (PR) Curve
+### Precision-Recall Curve
 
 ![Precision-Recall Curve](images/BoxPR_curve.png)
 
-This is the most informative single plot for evaluating an object detector — it shows the precision-recall trade-off across all possible confidence thresholds. A curve hugging the top-right corner indicates a model that achieves both high precision and high recall simultaneously.
+This chart answers the question: if I want the model to find more damage, how much extra noise (wrong detections) do I have to accept?
 
-Per-class Average Precision (AP@0.5):
+Every curve on this chart represents one damage class. A curve that stays up in the top-right corner means the model is both accurate and thorough — it finds most of the real damage without inventing much fake damage. A curve that drops away early means accuracy falls apart as you try to find more.
 
-| Class | AP@0.5 | Interpretation |
+Per-class scores:
+
+| Class | Score | What it means |
 |---|---|---|
-| Longitudinal Crack | **0.953** | Near-perfect; curve stays high across the full recall range |
-| Alligator Crack | **0.893** | Strong performance; slight drop in precision at recall >0.85 |
-| Pothole | **0.859** | Good; curve holds precision well until recall ~0.80 |
-| Transverse Crack | **0.662** | Weakest; precision degrades rapidly above recall ~0.50 |
-| **All classes (mAP@0.5)** | **0.842** | Strong overall — note this is the final epoch value |
-
-The transverse crack curve (green) drops steeply — reflecting the normalised confusion matrix finding that these are hard for the model to detect while maintaining precision. The longitudinal crack curve (orange) is exceptional, staying above 0.85 precision even at 0.90 recall.
+| Longitudinal Crack | 0.953 | Excellent — the model barely misses any and rarely gets confused |
+| Alligator Crack | 0.893 | Very good |
+| Pothole | 0.859 | Good — some shadow false positives pull it down slightly |
+| Transverse Crack | 0.662 | Weakest — the model struggles to find these without also flagging wrong things |
+| **Overall average** | **0.842** | Strong result for a 4-class real-world dataset |
 
 ---
 
-### Box F1-Confidence Curve
+### F1-Confidence Curve
 
 ![F1-Confidence Curve](images/BoxF1_curve.png)
 
-The F1 score is the harmonic mean of precision and recall. This curve shows how F1 changes as the confidence threshold varies from 0 to 1.
+The **confidence threshold** is a dial you can adjust: higher means the model only reports detections it's very sure about (fewer results, but more reliable); lower means it reports anything it suspects (more results, but more false positives too).
 
-Key readings:
+This chart shows how the overall detection quality changes as you move that dial. The peak of the overall curve (shown in dark blue) is at confidence **0.47**, giving an F1 score of **0.79**. That's the mathematically optimal threshold.
 
-- **Best overall F1: 0.79** achieved at confidence threshold **0.471**. This is the recommended operating threshold for a balanced application where neither false positives nor false negatives are critically costly.
-- **Longitudinal crack** peaks highest (~0.91 F1 at ~0.55 confidence) — the easiest and best-detected class.
-- **Alligator crack** peaks around 0.85 F1 at ~0.45 confidence.
-- **Pothole** peaks around 0.80 F1 at ~0.45 confidence.
-- **Transverse crack** peaks at only ~0.64 F1 at ~0.35 confidence — and this peak is much broader and flatter, indicating the model has lower certainty about this class across all thresholds.
+The default threshold I set in the app is 0.25, which is below the peak. I did that deliberately — in a road safety context, missing real damage is more dangerous than flagging a false one. The app lets users raise the threshold if they want fewer but more reliable results.
 
-The default confidence threshold of **0.25** in the Streamlit app is deliberately set below the F1 peak to prioritise recall over precision — in a safety-monitoring context, missing real damage is generally worse than flagging a false positive.
+Longitudinal crack (orange) peaks highest at 0.91, confirming it's the model's strongest class. Transverse crack (green) only reaches 0.64 even at its best — this class is genuinely harder.
 
 ---
 
-### Box Precision-Confidence Curve
+### Precision-Confidence Curve
 
 ![Precision-Confidence Curve](images/BoxP_curve.png)
 
-Precision measures: of all detections made, what fraction were correct? This curve rises monotonically as threshold increases — at very high confidence, almost all predictions are correct, but many real instances go undetected.
+This chart answers: if I raise the confidence threshold, how much more accurate do the remaining detections get?
 
-Notable observations:
-- **Alligator crack and longitudinal crack** reach 0.95+ precision at relatively low confidence (~0.60), indicating the model is very confident and accurate when it does commit to these classes.
-- **Transverse crack** (green) lags the other classes throughout — precision at 0.50 confidence is ~0.70 compared to ~0.85 for other classes.
-- At confidence 0.943, all classes converge to precision 1.0 — but at this threshold, recall would be near zero (the model would only flag near-certain instances).
+As expected, precision climbs as the threshold rises — at very high confidence, almost every detection is correct. But by that point, the model is only flagging the most obvious, unambiguous cases and ignoring anything subtle.
+
+Longitudinal and alligator cracks hit high precision early, at relatively modest confidence levels. Transverse cracks (green) lag behind throughout — even at the same confidence level, the model's transverse crack detections are less reliable than its others.
 
 ---
 
-### Box Recall-Confidence Curve
+### Recall-Confidence Curve
 
 ![Recall-Confidence Curve](images/BoxR_curve.png)
 
-Recall measures: of all real damage instances, what fraction did the model find? This curve falls monotonically as threshold increases.
+The flip side: as you raise the confidence threshold, how many real damage instances start getting missed?
 
-Key observations:
-- **Longitudinal crack** maintains 0.90+ recall down to confidence ~0.80 — showing the model is very confident in its longitudinal crack detections.
-- **All classes** start near 0.95–0.99 recall at confidence 0.0 (threshold so low it catches almost everything, but with many false positives).
-- **Transverse crack** (green) drops fastest — by confidence 0.40, recall has already fallen to ~0.55. This confirms the model has genuinely lower confidence in transverse crack detections, not just a calibration issue.
-- At the operational threshold of 0.25, estimated recall is approximately: pothole ~0.90, longitudinal ~0.95, alligator ~0.88, transverse ~0.72.
+All classes start near full recall at very low confidence — the model finds almost everything, but also flags a lot of false positives. As the threshold rises, recall falls.
+
+Longitudinal crack holds strong longest — even at confidence 0.80, it's still finding 90% of real instances. Transverse crack drops away fastest — by confidence 0.40, it's already missing nearly half of all real transverse cracks. This isn't a tuning problem; the model genuinely has lower certainty about this class.
 
 ---
 
-### Validation Batch — Ground Truth vs Predictions
+### Ground Truth vs Predictions — Side by Side
 
-**Ground Truth Labels:**
+**What the correct answers look like:**
 
-![Validation Batch 0 — Ground Truth](images/val_batch0_labels.jpg)
+![Validation Batch — Ground Truth](images/val_batch0_labels.jpg)
 
-**Model Predictions:**
+**What the model predicted on images it had never seen:**
 
-![Validation Batch 0 — Predictions](images/val_batch0_pred.jpg)
+![Validation Batch — Predictions](images/val_batch0_pred.jpg)
 
-These side-by-side images are the most intuitive evaluation of model quality. Comparing the ground truth (left) with model predictions (right) on images never seen during training:
+This is the most honest test. The ground truth images show where human annotators marked damage. The prediction images show what the model found on its own, with zero prior exposure to these photos.
 
-- **Box alignment is strong:** In almost all cases where the ground truth shows damage, the predicted box closely matches in both position and size. The IoU between matching boxes visually appears well above the 0.5 threshold required to count as correct.
-- **Confidence scores are meaningful:** High-confidence predictions (0.8, 0.9) visible in the prediction image correspond to prominent, unambiguous damage. Borderline cases show lower confidence (0.3–0.4), correctly reflecting difficulty.
-- **Class accuracy is high:** There are no visible cases in this batch of the model predicting the wrong damage type for a clearly visible instance.
-- **Some boxes are missed:** A few ground truth annotations have no corresponding prediction box — these are the false negatives captured in the recall metrics above.
-- **False positives are rare but present:** Some prediction boxes appear where no ground truth annotation exists — mostly on subtle road textures.
+The boxes match up well in most cases. Position and size are close to correct. The confidence numbers on the prediction image are meaningful — high scores on clear, obvious damage; lower scores on subtler or partially obscured cases. There are a small number of misses and a few extra boxes on tricky areas, which is consistent with the numbers we saw in the confusion matrix.
 
 ---
 
 ### Training Batch Samples
 
-**Early Training (Epoch 1–3):**
+**Early training (first few epochs):**
 
 ![Early Training Batch](images/train_batch0.jpg)
 
-**Late Training (Epoch ~82+):**
+**Later training (after epoch 82):**
 
 ![Late Training Batch](images/train_batch29880.jpg)
 
-The training batches illustrate the mosaic augmentation (four images combined per tile), varied lighting conditions (bright sunlight, overcast, wet roads), and the diversity of road types in the dataset. Both early and late batches look visually similar in terms of augmentation — the difference between them is entirely in the model's ability to correctly predict these images, not in what the images look like.
+These images show what the model was being fed during training. You can see four road photos stitched together in each tile — that's the mosaic effect. The variety is obvious: different times of day, different road surfaces, dry and wet conditions. This variety is what makes the trained model robust rather than narrow.
 
 ---
 
-## Final Results and What They Mean
+## Final Numbers and What They Mean
 
-After 94 epochs of training, the model achieved the following on the held-out validation set:
+After 94 epochs, here's where the model landed on the held-out validation set:
 
-| Metric | Value | Interpretation |
+| What's Being Measured | Score | Plain English |
 |---|---|---|
-| **Best mAP@0.5** | **0.8682** (epoch 86) | Excellent for a 4-class road damage detector |
-| Final mAP@0.5 | 0.8447 (epoch 94) | Robust final performance |
-| mAP@0.5:0.95 | 0.5089 | Good box precision across IoU thresholds |
-| Precision | 0.8218 | 82% of detections are genuine damage |
-| Recall | 0.7846 | 78% of all real damage instances found |
-| Val Box Loss | 1.3245 | Low — model localises damage well |
-| Val Cls Loss | 0.7686 | Low — model classifies damage types well |
+| **Best accuracy (mAP@0.5)** | **0.868** (epoch 86) | Out of every 100 real damage instances, the model correctly finds and labels about 87 |
+| Final accuracy | 0.845 (epoch 94) | Solid end-of-training performance |
+| Stricter accuracy (mAP@0.5:0.95) | 0.509 | Same idea but boxes need to match more precisely to count as correct |
+| Precision | 0.822 | 82 out of every 100 detections the model makes are genuine damage |
+| Recall | 0.785 | The model finds 78 out of every 100 real damage instances |
 
-### What is mAP@0.5?
+**On precision and recall:** These two numbers always pull against each other. High precision means few false alarms. High recall means few misses. Getting both high simultaneously is what makes a good model, and 0.82 precision with 0.78 recall is a good balance for a safety-related application.
 
-**Mean Average Precision at IoU 0.5** is the standard benchmark for object detection. A detection is counted correct only if the predicted box overlaps the ground truth by at least 50%. Average Precision is the area under the PR curve per class; mAP averages this across all four classes. Our **0.868 mAP@0.5** means the model achieves, on average, 86.8% average precision across all four damage types.
-
-### What is mAP@0.5:0.95?
-
-This stricter metric averages precision across IoU thresholds from 0.50 to 0.95 in steps of 0.05. Our score of **0.509** reflects correct damage location, but achieving pixel-perfect boundary alignment for irregular shapes like alligator cracks remains challenging.
-
-### Precision (0.8218) and Recall (0.7846)
-
-Of every 100 detections made, approximately 82 are genuine damage (Precision). Of every 100 actual damage instances in validation images, the model finds approximately 78 (Recall). The F1 ≈ 0.803 indicates a well-balanced detector, neither over-cautious nor overly aggressive.
+**On the stricter accuracy score:** The 0.509 score sounds low compared to 0.868, but the scale is different — a detection only counts as correct if the box drawn matches the real box very precisely (up to 95% overlap). That's an extremely tight requirement, especially for irregular shapes like alligator cracks.
 
 ---
 
-## Per-Class Performance Analysis
+## How Each Damage Type Performed
 
-Extracted from the PR curve and confusion matrix:
-
-| Class | AP@0.5 | Precision (est.) | Recall (est.) | Key Challenge |
+| Damage Type | Accuracy Score | Precision | Recall | Main Difficulty |
 |---|---|---|---|---|
-| Longitudinal Crack | 0.953 | ~0.93 | ~0.93 | Almost no challenge; linear features are highly distinctive |
-| Alligator Crack | 0.893 | ~0.89 | ~0.87 | Complex geometry; sometimes confused with road texture |
-| Pothole | 0.859 | ~0.87 | ~0.88 | Bowl-shaped features are distinctive; false positives from shadows |
-| **Transverse Crack** | **0.662** | **~0.78** | **~0.72** | **Hardest class — subtle contrast, thin lines, background confusion** |
+| Longitudinal Crack | 0.953 | ~0.93 | ~0.93 | Almost none — straight lines are easy to learn |
+| Alligator Crack | 0.893 | ~0.89 | ~0.87 | Complex irregular shape; occasionally blends with rough road texture |
+| Pothole | 0.859 | ~0.87 | ~0.88 | Distinctive shape but shadows trigger false positives |
+| **Transverse Crack** | **0.662** | **~0.78** | **~0.72** | **Consistently the hardest class** |
 
-**Why is transverse crack the hardest?**
+**Why transverse cracks are the hardest:**
 
-Transverse cracks run perpendicular to traffic direction, meaning they appear as narrow horizontal lines in dashcam images. Three factors combine to make them difficult:
+They run perpendicular to traffic, which means in a dashcam photo they appear as narrow horizontal lines — often very faint, very thin, and easy to confuse with painted road markings. Three things make them tough for any model:
 
-1. **Low contrast:** Transverse cracks in dry weather often have minimal contrast with the surrounding road surface.
-2. **Small bounding boxes:** They tend to be short cracks (relative to the image width), appearing as small annotations at the boundary of what 640×640 resolution can reliably detect.
-3. **Visual ambiguity:** Painted road markings (zebra crossings, lane markers) can resemble transverse cracks at certain scales and lighting conditions.
+1. They have very low contrast against the road in dry conditions.
+2. They're physically small relative to the image area, making them hard to detect at any resolution.
+3. Zebra crossings and faded lane markings look similar to them from a distance.
 
-**Recommended improvement:** Collecting 500+ additional transverse crack images, particularly in varied lighting conditions and from roads with painted markings, would likely close the performance gap significantly.
-
----
-
-## Error Analysis
-
-Understanding where and why the model fails is as important as understanding where it succeeds.
-
-### Failure Mode 1: Shadow-Triggered False Positives (Pothole)
-
-**What happens:** Tree shadows or vehicle shadows falling across the road surface create dark patches that share visual features with shallow potholes (a dark, roughly circular or irregular patch). The model predicts pothole with low-to-medium confidence (0.25–0.45).
-
-**Frequency:** Moderate. Most common in early morning and late afternoon images where shadows are long.
-
-**Mitigation:** Raising the confidence threshold to 0.45+ for pothole class, or applying temporal consistency checks in video mode (a real pothole appears in the same location across multiple frames; a moving shadow does not).
-
-### Failure Mode 2: Road Markings as Cracks
-
-**What happens:** Faded painted lane dividers, pedestrian crossing markings, or road repair patches with linear geometry are occasionally predicted as longitudinal or transverse cracks.
-
-**Frequency:** Low. The model has largely learned to distinguish markings from structural cracks, but faded markings on old roads remain challenging.
-
-**Mitigation:** Augmenting the training set with images of roads that have prominent markings, explicitly labelled as negative examples (no damage annotation).
-
-### Failure Mode 3: Small Transverse Cracks Missed
-
-**What happens:** Hairline transverse cracks that subtend less than 2% of image width are frequently missed entirely (false negatives). These are genuinely difficult — a human inspector at full image resolution would also require zooming in to confidently identify them.
-
-**Frequency:** High for early-stage cracks; the model reliably detects mature, wide cracks.
-
-**Mitigation:** Higher input resolution (e.g., running the model at 1280×1280) would improve small object recall, at the cost of 4× slower inference. For monitoring applications where speed is not critical, this is the recommended approach.
-
-### Failure Mode 4: Motion Blur
-
-**What happens:** Images captured from moving vehicles at speeds above ~40km/h with standard dashcam hardware often show horizontal motion blur. Blurred crack edges lose the sharp contrast that the model uses as a detection cue.
-
-**Frequency:** Dataset-dependent. The current training data does not include heavily blurred images, so the model was not exposed to this failure mode.
-
-**Mitigation:** Augmenting training with synthetically blurred versions of existing images (horizontal Gaussian blur at varying kernel widths).
-
-### Failure Mode 5: Severe Occlusion
-
-**What happens:** When a vehicle is parked over road damage or when heavy water pooling covers a pothole, the model cannot detect the underlying damage.
-
-**Frequency:** Low in standard conditions, but relevant for monsoon-season datasets.
-
-**Mitigation:** Not addressable by the model alone — requires sensor fusion (e.g., ground-penetrating radar for subsurface damage) for truly comprehensive detection.
+If I were to continue this project, adding 500+ more transverse crack training images from varied conditions would likely close most of this performance gap.
 
 ---
 
-## Inference Benchmarking
+## Where the Model Makes Mistakes
 
-Deployment decisions require understanding not just accuracy but computational cost:
+Getting strong accuracy numbers is good, but understanding *how* the model fails is equally important — it's the difference between a project that sounds impressive and one that could actually be deployed safely.
 
-| Metric | Value | Notes |
-|---|---|---|
-| Average inference time | ~45ms | Per image on NVIDIA T4 (Colab) |
-| Throughput | ~22 frames/second | Suitable for near-real-time video |
-| Model file size (best.pt) | ~22MB | Small enough for edge deployment |
-| Parameters | ~11.2M | YOLOv8s standard |
-| FLOPs | ~28.6 GFLOPs | Per 640×640 image |
-| CPU inference (estimated) | ~200–400ms | On modern i7/i9; usable for batch processing |
-| Raspberry Pi 4 (estimated) | ~1–2 seconds | Feasible for low-speed capture applications |
+**Shadows that look like potholes**
+Long shadows from trees or parked vehicles create dark patches on the road that share a lot of visual features with shallow potholes. The model flags these with low-to-medium confidence. In a video stream, you can filter these out by checking whether the "pothole" moves between frames — real potholes stay still, shadows move.
 
-**Practical throughput implications:**
+**Faded road markings called cracks**
+Old lane markers and pedestrian crossing paint, when worn down enough, look remarkably like longitudinal or transverse cracks. The model has mostly learned to tell them apart but still struggles on very faded markings on old roads.
 
-- At 45ms per frame, the system can process dashcam footage at approximately 22fps — close to real-time 30fps. With minor optimisations (half-precision inference, TensorRT export), real-time performance is achievable on T4-class hardware.
-- For batch offline analysis (e.g., processing last night's drone footage), throughput is effectively unlimited — a 1-hour drone survey at 5fps generates 18,000 frames, processable in under 15 minutes on a single T4 instance.
+**Tiny cracks simply not noticed**
+Hairline cracks in their very early stage — barely a millimetre wide — are frequently missed. Honestly, a human would need to zoom in to spot them too. These aren't really model failures; they're at the edge of what any camera-based system can detect.
+
+**Motion blur from fast-moving vehicles**
+If the camera is in a vehicle doing more than about 40 km/h with consumer-grade hardware, the resulting blur can make crack edges too soft for the model to detect. The training data didn't include blurry images, so this is a blind spot.
+
+**Damage that's covered**
+A parked vehicle sitting on top of a pothole, or a pothole flooded after rain — the model obviously can't detect what it can't see. This is a limitation of any camera-only system.
 
 ---
 
-## The Streamlit Web Application
+## How Fast Does It Run
 
-The project is deployed as a fully interactive web application built with Streamlit, a Python library that wraps data science models in a browser-accessible interface.
+| Metric | Value |
+|---|---|
+| Average time per image | ~45ms |
+| Frames per second | ~22 fps |
+| Model file size | ~22MB |
+| Total parameters | ~11.2 million |
+| Estimated speed on CPU | ~200–400ms per image |
+| Estimated speed on Raspberry Pi | ~1–2 seconds per image |
+
+At 22 fps, the model is close to real-time on a T4 GPU. A dashcam typically captures at 30 fps, so there's a slight gap — but with some optimisation (like running at half numerical precision), real-time is achievable on that hardware.
+
+For offline batch work — say, processing footage from last night's inspection drone — speed matters less. A 1-hour drone flight at 5 frames per second generates about 18,000 images. That batch can be processed in under 15 minutes on a single T4.
+
+---
+
+## The Web App
+
+The whole project is wrapped in a browser-based application built with Streamlit, a Python tool that turns model code into an interactive web interface without needing web development skills.
 
 ### Detection Tab
+Upload any road photo and get results back in under a second. The app shows the original image alongside the annotated version with coloured boxes (red for potholes, orange for longitudinal cracks, green for transverse, blue for alligator). Each box has a confidence score printed on it. Below the images, a summary shows how many instances of each damage type were found and how confident the model was.
 
-The core functionality. Upload any road photograph and the model processes it in real time:
-
-- **Original image** and **annotated image** displayed side by side
-- **Coloured bounding boxes** per class: red (pothole), orange (longitudinal crack), green (transverse crack), blue (alligator crack)
-- **Confidence scores** printed inside each box
-- **Detection cards** summarising instance counts and average confidence per class
-- **Severity indicators** (High/Medium) for immediate triage
-- **Confidence bar chart** visualising certainty for each individual detection
-- **Confidence threshold slider** (default 0.25) for adjusting the precision-recall operating point
-- **IoU threshold slider** for controlling Non-Maximum Suppression aggressiveness
+There's a slider to adjust the confidence threshold — raise it to see only high-confidence detections, lower it to see everything the model suspects.
 
 ### Training Curves Tab
-
-Interactive Plotly charts built from `results.csv` logged during training. Hover for exact values, zoom any region, toggle series. The resume event at epoch 82 is highlighted and annotated.
+Interactive charts of all the training metrics across all 94 epochs. Hover over any point to see exact numbers. The epoch 82 jump is marked and explained.
 
 ### Metric Plots Tab
-
-All training visualisation images including confusion matrices, PR curves, F1 curves, and label distribution charts.
+All the charts from the training run — confusion matrices, PR curves, F1 curves.
 
 ### Batch Samples Tab
-
-Visual inspection of training and validation images — the most intuitive way to understand what the model is doing.
+Visual examples of training images and side-by-side ground truth vs prediction comparisons.
 
 ---
 
-## Deployment Architecture
-
-### Local / Streamlit Architecture
+## System Overview
 
 ```
-┌─────────────┐     Image upload     ┌─────────────────────┐
-│    User     │ ─────────────────── ▶ │   Streamlit Frontend │
-│  (Browser)  │ ◀─────────────────── │   (Python + HTML)    │
-└─────────────┘  Annotated results   └──────────┬──────────┘
+┌─────────────┐     Uploads photo    ┌─────────────────────┐
+│    User     │ ──────────────────▶  │   Streamlit Web App  │
+│  (Browser)  │ ◀──────────────────  │   (Python + HTML)    │
+└─────────────┘   Gets results back  └──────────┬──────────┘
                                                  │
                                       ┌──────────▼──────────┐
                                       │   YOLOv8s Model      │
@@ -675,121 +577,51 @@ Visual inspection of training and validation images — the most intuitive way t
                                       └──────────┬──────────┘
                                                  │
                                       ┌──────────▼──────────┐
-                                      │  Prediction Engine   │
-                                      │  NMS + Filtering     │
+                                      │  Finds damage +      │
+                                      │  Removes duplicates  │
                                       └──────────┬──────────┘
                                                  │
                                       ┌──────────▼──────────┐
-                                      │ Visualisation Layer  │
-                                      │ Box drawing + labels │
+                                      │  Draws boxes +       │
+                                      │  Adds labels         │
                                       └─────────────────────┘
 ```
 
 ---
 
-## AWS Deployment Architecture
+## Reading the Detections
 
-Since this project is relevant to the Amazon ML School application, it is worth describing how this system would be deployed on AWS for production at scale. The architecture below supports both real-time API inference and batch processing pipelines:
+A few things to keep in mind when using the app:
 
-```
-                              ┌─────────────────────┐
-                              │   Client Application │
-                              │ (Mobile / Web / IoT) │
-                              └──────────┬──────────┘
-                                         │  HTTPS POST /detect
-                              ┌──────────▼──────────┐
-                              │   Amazon API Gateway │
-                              │   (Rate limiting,    │
-                              │    Auth, Routing)    │
-                              └──────────┬──────────┘
-                                         │
-               ┌─────────────────────────┼──────────────────────────┐
-               │                         │                          │
-   ┌───────────▼───────────┐  ┌──────────▼──────────┐  ┌──────────▼──────────┐
-   │  AWS Lambda           │  │ Amazon SageMaker     │  │ Amazon S3           │
-   │  (Preprocessing:      │  │ Real-Time Endpoint   │  │ (Image storage,     │
-   │   resize, validate,   │  │                      │  │  model artifacts,   │
-   │   format image)       │  │ Hosts YOLOv8s        │  │  results archive)   │
-   └───────────┬───────────┘  │ best.pt model        │  └──────────┬──────────┘
-               │               │ ml.g4dn.xlarge       │             │
-               └───────────────▶ (T4 GPU, $0.736/hr) │             │
-                               └──────────┬──────────┘             │
-                                          │                         │
-                               ┌──────────▼──────────┐             │
-                               │ Amazon DynamoDB      │             │
-                               │ (Detection metadata: │◀────────────┘
-                               │  location, class,    │
-                               │  confidence, time)   │
-                               └──────────┬──────────┘
-                                          │
-                               ┌──────────▼──────────┐
-                               │ Amazon QuickSight    │
-                               │ (Dashboard: road     │
-                               │  health maps, trends,│
-                               │  maintenance alerts) │
-                               └─────────────────────┘
+**Confidence above 0.70** — These are solid detections. The model is confident and is almost certainly right.
 
-          BATCH PIPELINE (for drone/dashcam footage):
-          ┌──────────────────────────────────────────┐
-          │  Video files ──▶ S3 ──▶ AWS Batch ──▶   │
-          │  SageMaker Batch Transform ──▶ S3        │
-          │  (thousands of frames, no GPU idle cost) │
-          └──────────────────────────────────────────┘
-```
+**Confidence 0.40 to 0.70** — Probably correct, but worth glancing at the image yourself to confirm.
 
-**Key AWS services and their roles:**
+**Confidence 0.25 to 0.40** — The model spotted something that resembles damage. Could be real, could be a shadow or road marking. Look carefully.
 
-**Amazon S3** stores uploaded images, the model artifact (`best.pt`), and archived detection results. A bucket lifecycle policy moves results older than 90 days to S3 Glacier, reducing storage costs by ~80%.
+**Multiple boxes on the same spot** — If two boxes heavily overlap, use the IoU threshold slider to merge them. Higher threshold = more merging.
 
-**AWS Lambda** handles lightweight preprocessing (image validation, resizing, format conversion) without requiring a persistent GPU instance. Cost: effectively zero for moderate traffic (<1M requests/month free tier).
-
-**Amazon SageMaker Real-Time Endpoint** hosts the YOLOv8s model on a `ml.g4dn.xlarge` instance (1× NVIDIA T4, 16GB VRAM). Supports auto-scaling based on invocations per minute. For a city inspection system processing ~5,000 images/day, a single endpoint instance at ~$0.74/hr is sufficient with auto-shutdown during off-hours (~$8–10/day).
-
-**Amazon API Gateway** provides authentication, rate limiting, and a stable HTTPS endpoint for client applications (mobile apps, dashcam firmware, web dashboards).
-
-**Amazon DynamoDB** stores detection metadata (image ID, GPS coordinates, detected classes, confidence scores, timestamp) for fast querying. A GSI on `(location, damage_class)` supports geographic queries like "all potholes within 5km radius."
-
-**Amazon QuickSight** builds road health dashboards from DynamoDB data — heat maps of damage density, trend charts showing deterioration rate, and automated maintenance priority reports exportable to PDF.
-
-**SageMaker Batch Transform** handles offline batch processing of drone footage or historical dashcam archives, using spot instances to reduce compute cost by up to 70% compared to on-demand pricing.
+**Nothing detected** — The model doesn't find anything it isn't reasonably sure about. If the photo has unusual lighting, a very oblique angle, or only hairline cracks, it may well come back empty. That's not a bug.
 
 ---
 
-## How to Interpret Detections
+## Reproducing This Project
 
-When using the application, a few principles help interpret results well:
+Everything needed to reproduce this exact result:
 
-**High confidence (above 0.70):** Detections are almost always correct. Trust them.
-
-**Medium confidence (0.40–0.70):** Usually correct but warrant visual verification. Look at the image yourself to confirm.
-
-**Low confidence (0.25–0.40):** The model's best guess at ambiguous cases. Could be early-stage damage, false positives from shadows/markings, or genuine borderline cases.
-
-**Multiple overlapping boxes:** Handled by Non-Maximum Suppression (NMS). Increasing the IoU threshold reduces merging aggressiveness; decreasing it merges boxes more aggressively.
-
-**Missing detections:** Expected and normal. The model was trained on a specific distribution of images. Unusual camera angles, very low light, or hairline cracks may not be detected.
-
----
-
-## Reproducibility
-
-To reproduce this exact training run:
-
-| Component | Version |
+| Tool / Setting | Version / Value |
 |---|---|
 | Python | 3.11 |
-| Ultralytics | 8.x (tested on 8.0.x) |
+| Ultralytics | 8.x |
 | PyTorch | 2.x |
-| CUDA | 12.x (T4 via Colab) |
-| GPU | NVIDIA T4, 15GB VRAM |
-| OS | Ubuntu 22.04 (Colab environment) |
-| Random seed | 0 (set via `seed: 0` in args.yaml) |
-| Deterministic | True (`deterministic: true` in args.yaml) |
-| Dataset split | 80/20, stratified by class |
+| GPU | NVIDIA T4 (Google Colab free tier) |
+| Operating System | Ubuntu 22.04 |
+| Random seed | 0 |
+| Dataset split | 80% train, 20% validation |
 
-Full hyperparameters are preserved in `args.yaml` (included in this repository). Resume from `last.pt` checkpoint to replicate epochs 82–94. Resume from `last_epoch80_backup.pt` to replicate the full training run including the pre-resume phase.
+All hyperparameters are saved in `args.yaml` in this repository. To resume from epoch 82 onward, use `last.pt`. To replay the full run including the pre-resume phase, use `last_epoch80_backup.pt`.
 
-To retrain from scratch:
+To train from scratch:
 ```bash
 pip install ultralytics
 yolo detect train \
@@ -807,40 +639,16 @@ yolo detect train \
 
 ---
 
-## Limitations and Future Scope
+## What Could Be Better
 
-### Current Limitations
+**Transverse cracks need more data.** This class underperforms the others by a noticeable margin. It would benefit most from targeted data collection — specifically photos of transverse cracks on roads with faded markings, in varying lighting conditions.
 
-**Class imbalance:** While moderate (2.7:1 ratio), the imbalance between potholes and longitudinal cracks still affects per-class performance. Transverse crack detection suffers most.
+**No depth information.** The model draws a 2D box around damage but has no idea how deep a pothole actually is, or how wide a crack has grown. That matters for prioritising repairs. Adding a depth sensor or using stereo cameras would enable real severity scoring.
 
-**Image quality dependency:** Blurry, very low-light, or heavily shadowed images produce less accurate results. The model always outputs predictions — it has no mechanism to signal low-confidence input images as unreliable.
+**Blurry images are a weakness.** The training data was all sharp. In the real world, dashcam footage from fast-moving vehicles can be blurry. Synthetically blurring some training images would help close this gap.
 
-**2D bounding boxes only:** The model detects damage in 2D image space with no information about physical dimensions. A pothole appearing small in a wide-angle image may be large in reality. Severity assessment requires calibrated cameras or depth sensors.
+**Only tested on dashcam-style angles.** Drone footage from overhead might produce weaker results since the model has only ever seen near-horizontal road photos.
 
-**Fixed camera perspective:** The training data is predominantly dashcam-style (near-horizontal view). Performance on aerial, overhead, or oblique drone imagery is not validated.
-
-### Future Directions
-
-**Severity quantification:** Integrating depth cameras or stereo vision to estimate physical dimensions and depth of damage, enabling quantitative maintenance prioritisation.
-
-**Video processing:** Extending the system to real-time video streams from dashcams, with temporal consistency to reduce false positives from shadows.
-
-**Geographic mapping:** Combining detections with GPS coordinates to build road health maps for maintenance authority planning.
-
-**Instance segmentation:** Upgrading from bounding boxes to pixel-level masks using YOLOv8-seg, enabling measurement of crack length, width, and area.
-
-**Edge deployment:** Quantising and optimising the model (ONNX/TensorRT export) for deployment on embedded hardware (NVIDIA Jetson Nano, Raspberry Pi 4).
-
-**Improved transverse crack detection:** Targeted data collection of ~500+ transverse crack images in challenging conditions (wet roads, faded markings, low contrast) would likely bring this class's AP from 0.66 up to match the other classes.
+**Where I'd take this next:** Attaching GPS data to each detection so damage gets plotted on a map. Running it on continuous video rather than single photos. Trying pixel-level outlines instead of just boxes, so you can actually measure crack length and area. Packaging it for a small embedded computer that could sit in any inspection vehicle.
 
 ---
-
-## Acknowledgements
-
-This project was built using the **Ultralytics YOLOv8** framework, which provides an exceptional training and inference pipeline. The dataset was sourced from Kaggle (Alvaro Basily). Training was conducted on **Google Colab** using freely available GPU resources. The web application was built with **Streamlit**. Interactive visualisations use **Plotly**.
-
-Special thanks to the open-source computer vision community whose research, datasets, and tooling made this level of accuracy achievable as a student project.
-
----
-
-*This project was developed as part of B.Tech third-year coursework in Computer Science Engineering with AI/ML specialisation. The results demonstrate that production-quality computer vision systems are achievable with open-source tools, public datasets, and accessible compute resources — a testament to how far the field has come.*
