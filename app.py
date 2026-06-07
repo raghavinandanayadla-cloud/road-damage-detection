@@ -190,6 +190,13 @@ def load_results_csv():
 DARK = dict(template="plotly_dark", paper_bgcolor="#0f1117", plot_bgcolor="#1a1d2e",
             font=dict(color="#ccd6f6"), xaxis=dict(gridcolor="#2d3057"),
             yaxis=dict(gridcolor="#2d3057"))
+def _hex_to_rgba(hex_color: str, alpha: float = 0.12) -> str:
+    """Convert #rrggbb to rgba(r,g,b,alpha) for Plotly fillcolor."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 
 def training_dashboard(df):
     e = df["display_epoch"]
@@ -222,13 +229,13 @@ def training_dashboard(df):
     ], 1):
         fig.add_trace(go.Scatter(x=e, y=df[col], name=name,
                                  line=dict(color=color, width=2.5),
-                                 fill="tozeroy", fillcolor=color+"18"), row=2, col=col_i)
+                                 fill="tozeroy", fillcolor=_hex_to_rgba(color, 0.12)), row=2, col=col_i)
 
     # ── Row 3 ─────────────────────────────────────────────────────────────────
     # mAP50-95
     fig.add_trace(go.Scatter(x=e, y=df["metrics/mAP50-95(B)"], name="mAP@0.5:0.95",
                              line=dict(color="#fd79a8", width=2.5),
-                             fill="tozeroy", fillcolor="#fd79a818"), row=3, col=1)
+                             fill="tozeroy", fillcolor="rgba(253,121,168,0.12)"), row=3, col=1)
 
     # P-R scatter coloured by epoch
     fig.add_trace(go.Scatter(
@@ -552,7 +559,7 @@ with tab_curves:
             fig_map.add_trace(go.Scatter(
                 x=df["display_epoch"], y=df["metrics/mAP50(B)"],
                 mode="lines", name="mAP@0.5", line=dict(color="#a29bfe", width=2.5),
-                fill="tozeroy", fillcolor="#a29bfe18"))
+                fill="tozeroy", fillcolor="rgba(162,155,254,0.12)"))
             fig_map.add_vrect(x0=81, x1=82, fillcolor="#ff4757", opacity=0.15,
                               line_width=0, annotation_text="Resume", annotation_position="top left")
             fig_map.update_layout(title="mAP@0.5 across all 94 epochs",
